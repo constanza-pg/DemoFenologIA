@@ -1,0 +1,39 @@
+# Sistema operativo
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# Credenciales
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# Bases de datos y datos locales
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Modelos y resultados
+*.pt
+*.onnx
+runs/
+modelos/
+logs/
+
+# Respaldos y pruebas
+respaldos/
+*_antes_*
+*_respaldo*
+*_zip_prueba.py
+
+# Editores
+.vscode/
+.idea/
