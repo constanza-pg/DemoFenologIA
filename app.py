@@ -69,11 +69,22 @@ from database import (
     consultar_claro_monitoreado,
 )
 
-from analizador import analizar_uvas_roboflow
+from interfaz_fenologia import (
+    mostrar_editor_fenologia,
+    mostrar_resultados_fenologia
+)
 
 from autenticacion import verificar_usuario, crear_usuario, registrar_vina_administrador, consultar_usuario_activo
 
 inicializar_bd()
+from database import inicializar_investigacion
+inicializar_investigacion()
+
+from configuracion_indicadores import (
+    inicializar_configuracion_indicadores
+)
+
+inicializar_configuracion_indicadores()
 
 actualizar_esquema_transferencias()
 
@@ -197,216 +208,148 @@ def fmt(v, k) -> str:
     return f"{v:.{P['dec']}f}".replace(".", ",") + (f" {P['unidad']}" if P["unidad"] else "")
 
 
-def seleccionar_estacion_con_historial(vina_id):
-    """
-    Identifica por separado:
-    - La estación geográficamente más cercana.
-    - La estación más cercana que cumple criterios mínimos
-      de disponibilidad para análisis meteorológico.
-
-    No modifica la base de datos.
-    """
-
-    try:
-        estaciones = consultar_estaciones_cercanas(vina_id)
-    except ValueError as error:
-        if "coordenadas" in str(error).lower():
-            return None
-        raise
-
-    if not estaciones:
-        return None
-
-    variables = [
-        "temperatura_min",
-        "temperatura_max",
-        "humedad_relativa",
-        "precipitacion",
-        "radiacion_solar",
-        "velocidad_viento"
-    ]
-
-    minimo_dias = 30
-    minimo_variables = 3
-    cobertura_minima = 80.0
-    radio_maximo_km = 30.0
-
-    with conectar() as conexion:
-        resumenes = conexion.execute("""
-            SELECT estacion_id, COUNT(*)
-            FROM mediciones_meteorologicas
-            GROUP BY estacion_id
-        """).fetchall()
-
-    resumen_por_estacion = {
-        fila[0]: fila[1]
-        for fila in resumenes
-    }
-
-    estacion_seleccionada = None
-    registros_seleccionados = []
-    fecha_ultima_seleccionada = None
-    dias_desde_seleccionada = None
-    cobertura_seleccionada = {}
-    diagnostico = []
-
-    hoy = pd.Timestamp.now().normalize()
-
-    # Las estaciones se revisan desde la más cercana.
-    for indice, estacion in enumerate(estaciones):
-
-        estacion_id = estacion["estacion_id"]
-        cantidad = resumen_por_estacion.get(estacion_id, 0)
-
-        estado = "No apta para análisis"
-        motivo = ""
-        dias_distintos = 0
-        cobertura = {}
-
-        if cantidad == 0:
-            motivo = "Sin historial meteorológico general."
-
-        else:
-            registros = consultar_mediciones_meteorologicas(
-                estacion_id
-            )
-
-            if not registros:
-                motivo = "No fue posible recuperar sus registros."
-
-            else:
-                df = pd.DataFrame(registros)
-
-                df["fecha"] = pd.to_datetime(
-                    df["fecha"],
-                    errors="coerce"
-                )
-
-                df = df.dropna(subset=["fecha"])
-                df = df.sort_values("fecha")
-
-                # Se considera un solo registro por día.
-                df["dia"] = df["fecha"].dt.normalize()
-                df = df.drop_duplicates(
-                    subset=["dia"],
-                    keep="last"
-                )
-
-                dias_distintos = len(df)
-
-                if dias_distintos == 0:
-                    motivo = "No contiene fechas válidas."
-
-                else:
-                    for variable in variables:
-                        valores = pd.to_numeric(
-                            df[variable],
-                            errors="coerce"
-                        )
-
-                        porcentaje = (
-                            valores.notna().sum()
-                            / dias_distintos
-                        ) * 100
-
-                        cobertura[variable] = round(
-                            porcentaje, 1
-                        )
-
-                    variables_suficientes = [
-                        variable
-                        for variable, porcentaje
-                        in cobertura.items()
-                        if porcentaje >= cobertura_minima
-                    ]
-
-                    if dias_distintos < minimo_dias:
-                        motivo = (
-                            f"Historial insuficiente: "
-                            f"{dias_distintos} días; "
-                            f"se requieren al menos {minimo_dias}."
-                        )
-
-                    elif len(variables_suficientes) < minimo_variables:
-                        motivo = (
-                            f"Cobertura insuficiente: solo "
-                            f"{len(variables_suficientes)} variables "
-                            f"alcanzan el {cobertura_minima:.0f}%."
-                        )
-
-                    else:
-                        if estacion["distancia_km"] > radio_maximo_km:
-                            estado = "Fuera del radio de análisis"
-                            motivo = (
-                                f"Tiene historial suficiente, pero está a "
-                                f"{estacion['distancia_km']:.2f} km. "
-                                f"El radio máximo configurado es "
-                                f"{radio_maximo_km:.0f} km."
-                            )
-                        else:
-                            estado = "Apta para análisis"
-                            motivo = (
-                                "Cumple los criterios mínimos de "
-                                "disponibilidad, cobertura y distancia."
-                            )
-
-                        if (
-                            estacion_seleccionada is None
-                            and estacion['distancia_km'] <= radio_maximo_km
-                        ):
-                            estacion_seleccionada = estacion
-                            registros_seleccionados = (
-                                df.drop(columns=["dia"])
-                                .to_dict("records")
-                            )
-                            fecha_ultima_seleccionada = (
-                                df["fecha"].max()
-                            )
-                            dias_desde_seleccionada = (
-                                hoy
-                                - fecha_ultima_seleccionada.normalize()
-                            ).days
-                            cobertura_seleccionada = cobertura
-
-        # Conservamos el diagnóstico de las cinco estaciones
-        # geográficamente más cercanas.
-        if indice < 5:
-            diagnostico.append({
-                "estacion": estacion,
-                "estado": estado,
-                "motivo": motivo,
-                "dias_distintos": dias_distintos,
-                "cobertura": cobertura
-            })
-
-    estacion_mas_cercana = estaciones[0]
-
-    return {
-        "estacion": estacion_seleccionada,
-        "registros": registros_seleccionados,
-        "fecha_ultimo_registro": fecha_ultima_seleccionada,
-        "dias_desde_ultimo": dias_desde_seleccionada,
-        "es_referencia": (
-            estacion_seleccionada is not None
-            and estacion_seleccionada["estacion_id"]
-            != estacion_mas_cercana["estacion_id"]
-        ),
-        "estacion_mas_cercana": estacion_mas_cercana,
-        "diagnostico_estaciones": diagnostico,
-        "cobertura_variables": cobertura_seleccionada,
-        "criterios_calidad": {
-            "minimo_dias": minimo_dias,
-            "minimo_variables": minimo_variables,
-            "cobertura_minima": cobertura_minima,
-            "radio_maximo_km": radio_maximo_km
-        }
-    }
 
 
 # =====================================================================
 # 3. INTERFAZ
 # =====================================================================
 st.set_page_config(page_title=f"{NOMBRE_VINA} · Monitoreo vitícola", layout="wide")
+
+
+
+
+st.markdown("""
+<style>
+
+:root {
+    --fenologia-morado: #322345;
+    --fenologia-verde: #84C55D;
+    --fenologia-borde: #E4E7E2;
+}
+
+.stApp {
+    background-color: #FFFFFF;
+}
+
+.block-container {
+    max-width: 1500px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding-top: 1.2rem !important;
+    padding-bottom: 2rem !important;
+}
+
+.fenologia-logo {
+    color: #000000 !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.04em;
+}
+
+.fenologia-logo span {
+    color: #322345 !important;
+}
+
+h1 {
+    font-size: 2rem !important;
+    font-weight: 650 !important;
+    letter-spacing: -0.025em;
+}
+
+h2 {
+    font-size: 1.45rem !important;
+    font-weight: 600 !important;
+}
+
+h3 {
+    font-size: 1.15rem !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px !important;
+    border-color: #E4E7E2 !important;
+}
+
+[data-testid="stMetric"] {
+    background-color: #F6F7F5;
+    border-radius: 10px;
+    padding: 14px;
+}
+
+[data-testid="stMetricValue"] {
+    color: #322345;
+    font-size: 1.65rem !important;
+    font-weight: 600;
+}
+
+[data-testid="stMetricLabel"] {
+    font-weight: 500;
+}
+
+button[kind="primary"]:not(:disabled),
+button[kind="primaryFormSubmit"]:not(:disabled) {
+    background-color: #322345 !important;
+    border-color: #322345 !important;
+    color: #FFFFFF !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+button[kind="primary"]:not(:disabled):hover,
+button[kind="primaryFormSubmit"]:not(:disabled):hover {
+    background-color: #49365E !important;
+    border-color: #49365E !important;
+}
+
+[data-testid="stTabs"] [role="tab"] {
+    font-weight: 500;
+    padding-left: 14px;
+    padding-right: 14px;
+}
+
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    color: #322345 !important;
+    font-weight: 650 !important;
+    border-bottom: 3px solid #84C55D !important;
+}
+
+[data-baseweb="tab-highlight"] {
+    background-color: #84C55D !important;
+}
+
+[data-testid="stExpander"] details {
+    border-radius: 10px !important;
+    border-color: #E4E7E2 !important;
+}
+
+[data-testid="stDataFrame"] {
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+[data-testid="stImage"] img {
+    border-radius: 8px;
+}
+
+div.st-key-dm18_separador {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+
+@media (max-width: 768px) {
+    .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+
+    h1 {
+        font-size: 1.65rem !important;
+    }
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 
 
 # =========================================================
@@ -433,8 +376,10 @@ if st.session_state["usuario"] is None:
     }
 
     .block-container {
-        max-width: 650px;
-        padding-top: 7vh;
+        max-width: 760px !important;
+        margin: 0 auto !important;
+        width: 100% !important;
+        padding-top: 4vh !important;
         padding-bottom: 3rem;
     }
 
@@ -443,7 +388,7 @@ if st.session_state["usuario"] is None:
         font-size: clamp(3rem, 7vw, 5rem);
         font-weight: 750;
         letter-spacing: -2px;
-        margin-bottom: 2rem;
+        margin-bottom: 0.3rem;
         color: #000000;
     }
 
@@ -479,11 +424,154 @@ if st.session_state["usuario"] is None:
     div[data-testid="stRadio"] input {
         accent-color: #322345;
     }
-    </style>
+
+    div[data-testid="stRadio"] {
+        display: flex !important;
+        justify-content: center !important;
+    }
+
+    div[data-testid="stRadio"] [role="radiogroup"] {
+        justify-content: center !important;
+        gap: 1rem !important;
+        flex-wrap: wrap !important;
+    }
+
+    div[data-testid="stRadio"] label {
+        padding: 0.5rem;
+    }
+
+    div[data-testid="stFormSubmitButton"] button {
+        min-height: 2.8rem;
+    }
+
+</style>
     """, unsafe_allow_html=True)
 
     st.markdown(
         '<div class="fenologia-logo">Fenolog<span>IA</span></div>',
+        unsafe_allow_html=True
+    )
+
+
+    st.markdown(
+        "<p style='text-align:center;color:#777;'>"
+        "Monitoreo e investigación vitivinícola"
+        "</p>",
+        unsafe_allow_html=True
+    )
+
+
+    st.markdown("""
+    <style>
+
+    .st-key-perfiles_acceso {
+        max-width: 560px;
+        margin: 0 auto;
+    }
+
+    .st-key-perfiles_acceso div.stButton > button {
+        background-color: #FFFFFF !important;
+        color: #322345 !important;
+        border: 1.5px solid #DDD9E2 !important;
+        border-radius: 14px !important;
+        min-height: 60px !important;
+        width: 100% !important;
+        padding: 8px 10px !important;
+        transition: all 0.2s ease;
+    }
+
+    .st-key-perfiles_acceso div.stButton > button:hover {
+        background-color: #F4F8EF !important;
+        border-color: #84C55D !important;
+        color: #322345 !important;
+    }
+
+    .st-key-perfiles_acceso div.stButton > button[kind="primary"] {
+        background-color: #F0F7E9 !important;
+        border: 2px solid #84C55D !important;
+        color: #322345 !important;
+    }
+
+    .st-key-perfiles_acceso button p {
+        text-align: center !important;
+        font-size: 0.95rem !important;
+        line-height: 1.6 !important;
+    }
+
+    .st-key-opcion_acceso {
+        width: 100%;
+        margin: 0 auto;
+    }
+
+    .st-key-opcion_acceso [role="radiogroup"] {
+        width: 100%;
+        justify-content: center !important;
+        gap: 1.5rem !important;
+    }
+
+    </style>
+    """, unsafe_allow_html=True)
+
+    if "tipo_acceso_fenologia" not in st.session_state:
+        st.session_state["tipo_acceso_fenologia"] = (
+            "Gestión vitícola"
+        )
+
+    def seleccionar_perfil_acceso(perfil):
+        st.session_state["tipo_acceso_fenologia"] = perfil
+
+    st.markdown(
+        "<p style='text-align:center;"
+        "font-weight:600;color:#322345;"
+        "margin-top:12px;margin-bottom:4px;'>"
+        "Selecciona tu perfil</p>",
+        unsafe_allow_html=True
+    )
+
+    tipo_acceso = st.session_state[
+        "tipo_acceso_fenologia"
+    ]
+
+    with st.container(key="perfiles_acceso"):
+
+        col_viticola, col_investigacion = st.columns(
+            2, gap="medium"
+        )
+
+        with col_viticola:
+
+            st.button(
+                "Gestión vitícola",
+                icon=":material/agriculture:",
+                key="seleccionar_perfil_viticola",
+                type=(
+                    "primary"
+                    if tipo_acceso == "Gestión vitícola"
+                    else "secondary"
+                ),
+                width="stretch",
+                on_click=seleccionar_perfil_acceso,
+                args=("Gestión vitícola",)
+            )
+
+        with col_investigacion:
+
+            st.button(
+                "Investigación vitivinícola",
+                icon=":material/science:",
+                key="seleccionar_perfil_investigacion",
+                type=(
+                    "primary"
+                    if tipo_acceso == "Investigación vitivinícola"
+                    else "secondary"
+                ),
+                width="stretch",
+                on_click=seleccionar_perfil_acceso,
+                args=("Investigación vitivinícola",)
+            )
+
+    st.markdown(
+        "<div style='height:12px;'></div>",
         unsafe_allow_html=True
     )
 
@@ -518,8 +606,24 @@ if st.session_state["usuario"] is None:
                     usuario = verificar_usuario(email, password)
 
                     if usuario:
-                        st.session_state["usuario"] = usuario
-                        st.rerun()
+                        es_investigador = (
+                            usuario["rol"] == "investigador"
+                        )
+
+                        acceso_investigacion = (
+                            tipo_acceso ==
+                            "Investigación vitivinícola"
+                        )
+
+                        if es_investigador != acceso_investigacion:
+                            st.error(
+                                "Selecciona el tipo de acceso "
+                                "correspondiente a tu cuenta."
+                            )
+                        else:
+                            st.session_state.clear()
+                            st.session_state["usuario"] = usuario
+                            st.rerun()
                     else:
                         st.error(
                             "Correo o contraseña incorrectos."
@@ -530,6 +634,103 @@ if st.session_state["usuario"] is None:
                         "No se pudo iniciar sesión. "
                         "Inténtalo nuevamente."
                     )
+
+
+    elif tipo_acceso == "Investigación vitivinícola":
+
+        from autenticacion import registrar_investigador
+
+        with st.container(border=True):
+
+            st.subheader("Solicitud de acceso")
+
+            st.caption(
+                "Completa tus antecedentes académicos o "
+                "profesionales para solicitar acceso."
+            )
+
+            with st.form("registro_investigador"):
+
+                col_a_0, col_b_0 = st.columns(2)
+                with col_a_0:
+                    nombre = st.text_input("Nombre completo")
+                with col_b_0:
+                    email = st.text_input("Correo electrónico")
+
+                col_a_1, col_b_1 = st.columns(2)
+                with col_a_1:
+                    institucion = st.text_input(
+                        "Institución u organización"
+                    )
+                with col_b_1:
+                    area = st.text_input(
+                        "Área de investigación"
+                    )
+
+                finalidad = st.text_area(
+                    "Finalidad de la investigación",
+                    placeholder=(
+                        "Describe brevemente el uso "
+                        "que darás a los datos."
+                    )
+                )
+
+                col_a_2, col_b_2 = st.columns(2)
+                with col_a_2:
+                    password = st.text_input(
+                        "Contraseña",
+                        type="password",
+                        help="Mínimo 10 caracteres."
+                    )
+                with col_b_2:
+                    confirmar = st.text_input(
+                        "Confirmar contraseña",
+                        type="password"
+                    )
+
+                aceptar = st.checkbox(
+                    "Me comprometo a utilizar los datos "
+                    "exclusivamente con fines de investigación "
+                    "y a respetar la privacidad de los viñedos."
+                )
+
+                enviar = st.form_submit_button(
+                    "Enviar solicitud",
+                    use_container_width=True
+                )
+
+                if enviar:
+
+                    if not aceptar:
+                        st.warning(
+                            "Debes aceptar el compromiso de uso."
+                        )
+
+                    else:
+                        try:
+                            registrar_investigador(
+                                nombre,
+                                email,
+                                institucion,
+                                area,
+                                finalidad,
+                                password,
+                                confirmar
+                            )
+
+                            st.success(
+                                "Solicitud registrada correctamente. "
+                                "Tu cuenta quedará pendiente "
+                                "de aprobación."
+                            )
+
+                        except ValueError as e:
+                            st.error(str(e))
+
+                        except Exception:
+                            st.error(
+                                "No se pudo registrar la solicitud."
+                            )
 
     elif registro_habilitado:
 
@@ -622,6 +823,19 @@ st.session_state["usuario"] = usuario_vigente
 
 # Datos actualizados del usuario autenticado
 usuario_actual = st.session_state["usuario"]
+
+
+# Separacion de perfiles de investigacion y gestion viticola.
+if usuario_actual["rol"] == "investigador":
+
+    from interfaz_investigacion import (
+        mostrar_interfaz_investigacion
+    )
+
+    mostrar_interfaz_investigacion(usuario_actual)
+
+    st.stop()
+
 VINA_ID_ACTUAL = usuario_actual["vina_id"]
 NOMBRE_USUARIO = usuario_actual["nombre"]
 
@@ -637,6 +851,7 @@ st.markdown("<style>.block-container{padding-top:1.2rem}</style>", unsafe_allow_
 # =========================================================
 
 SECCIONES = [
+    "FenologIA",
     "Resumen y diagnóstico inteligente",
     "Mapa y monitoreo de plantas",
     "Meteorología y precipitaciones",
@@ -644,264 +859,35 @@ SECCIONES = [
     "Configuración de mi viña",
 ]
 
-# DM.16: compactar espacio de navegación
-st.markdown("""
-<style>
-/* Contenedor de la navegación */
-div.st-key-dm16_navegacion {
-    margin-bottom: 0 !important;
-    padding-bottom: 0 !important;
-}
-
-/* Reducir espacios internos de las columnas */
-div.st-key-dm16_navegacion
-[data-testid="stHorizontalBlock"] {
-    margin-bottom: 0 !important;
-    padding-bottom: 0 !important;
-}
-
-/* Mantener los botones completos */
-div.st-key-dm16_navegacion button {
-    border-radius: 10px !important;
-    overflow: visible !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# DM.12: navegación compacta y pestaña activa sólida
-st.markdown("""
-<style>
-/* Reducir el espacio superior general */
-.block-container {
-    padding-top: 0.5rem !important;
-}
-
-/* Botones de navegación */
-div[class*="st-key-nav_superior_"] button {
-    min-height: 2.15rem !important;
-    height: 2.15rem !important;
-    border-radius: 10px !important;
-    box-shadow: none !important;
-}
-
-/* Reducir el espacio vertical del separador */
-div[data-testid="stDivider"] {
-    margin-top: 0 !important;
-    margin-bottom: 0.25rem !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# Navegación superior de FenologIA
-
-SECCIONES = ["FenologIA"] + SECCIONES
-
-if "navegacion_principal" not in st.session_state:
-    st.session_state["navegacion_principal"] = "FenologIA"
-
-indice_activo = next(
-    (
-        i for i, (seccion, _) in enumerate([
-            ("FenologIA", "FenologIA"),
-            ("Resumen y diagnóstico inteligente", ""),
-            ("Mapa y monitoreo de plantas", ""),
-            ("Meteorología y precipitaciones", ""),
-            ("Fotografías y análisis IA", ""),
-        ])
-        if st.session_state["navegacion_principal"] == seccion
-    ),
-    -1
-)
-
-st.markdown(f"""
-<style>
-/* Botones de la barra de navegación */
-div[data-testid="stButton"] button[kind="secondary"] {{
-    border: none;
-    border-radius: 9px;
-    background: transparent;
-    color: #222222;
-}}
-
-div[data-testid="stButton"] button[kind="secondary"]:hover {{
-    background-color: #EDF5E8;
-    color: #222222;
-}}
-
-
-/* Estado activo de la navegación de FenologIA */
-
-div.st-key-nav_superior_0
-button[kind="secondary"] {{
-    background-color: transparent;
-    border: none;
-    color: #222222;
-}}
-
-div.st-key-nav_superior_1
-button[kind="secondary"] {{
-    background-color: transparent;
-    border: none;
-    color: #222222;
-}}
-
-div.st-key-nav_superior_2
-button[kind="secondary"] {{
-    background-color: transparent;
-    border: none;
-    color: #222222;
-}}
-
-div.st-key-nav_superior_3
-button[kind="secondary"] {{
-    background-color: transparent;
-    border: none;
-    color: #222222;
-}}
-
-div.st-key-nav_superior_4
-button[kind="secondary"] {{
-    background-color: transparent;
-    border: none;
-    color: #222222;
-}}
-
-/* Pestaña activa: rectángulo verde completo */
-
-div.st-key-nav_superior_{indice_activo} button[kind="secondary"] {{
-    background: #84C55D !important;
-    background-color: #84C55D !important;
-    border: 1px solid #84C55D !important;
-    border-radius: 10px !important;
-    color: #17210F !important;
-    font-weight: 650;
-}}
-
-/* El botón de usuario se destaca cuando Configuración está activa */
-/* Botones principales morados */
-div[data-testid="stButton"] button[kind="primary"] {{
-    background-color: #322345;
-    border-color: #322345;
-    color: white;
-    border-radius: 10px;
-}}
-
-div[data-testid="stButton"] button[kind="primary"]:hover {{
-    background-color: #49345F;
-    border-color: #49345F;
-    color: white;
-}}
-</style>
-""", unsafe_allow_html=True)
-
 opciones_superiores = [
-    ("FenologIA", "FenologIA"),
-    ("Resumen y diagnóstico inteligente", "Resumen y diagnóstico"),
-    ("Mapa y monitoreo de plantas", "Mapa y monitoreo"),
-    ("Meteorología y precipitaciones", "Meteorología y precipitaciones"),
-    ("Fotografías y análisis IA", "Fotografías y análisis"),
+    ("FenologIA", "Inicio"),
+    ("Resumen y diagnóstico inteligente", "Diagnóstico"),
+    ("Mapa y monitoreo de plantas", "Monitoreo"),
+    ("Meteorología y precipitaciones", "Meteorología"),
+    ("Fotografías y análisis IA", "Fotografías e IA"),
+    ("Configuración de mi viña", "Mi viña"),
 ]
 
-# DM.16: navegación en contenedor identificable
-contenedor_nav = st.container(key="dm16_navegacion")
+if st.session_state.get("navegacion_principal") not in SECCIONES:
+    st.session_state["navegacion_principal"] = "FenologIA"
 
-with contenedor_nav:
-    columnas_nav = st.columns(
-        [1.2, 1.8, 1.5, 2.2, 1.7, 0.55],
-        gap="small"
-    )
+def navegar_fenologia(destino):
+    st.session_state["navegacion_principal"] = destino
 
-for indice, (seccion, etiqueta) in enumerate(opciones_superiores):
+indice_activo = SECCIONES.index(
+    st.session_state["navegacion_principal"]
+)
 
-    with columnas_nav[indice]:
 
-        activa = (
-            st.session_state["navegacion_principal"] == seccion
-        )
+from estilos_fenologia import mostrar_cabecera_fenologia
 
-        if st.button(
-            etiqueta,
-            key=f"nav_superior_{indice}",
-            use_container_width=True,
-            type="secondary"
-        ):
-            st.session_state["navegacion_principal"] = seccion
-            st.rerun()
-
-with columnas_nav[-1]:
-    if st.button(
-        "👤",
-        key="nav_configuracion",
-        use_container_width=True,
-        help="Configuración de mi viña"
-    ):
-        st.session_state["navegacion_principal"] = (
-            "Configuración de mi viña"
-        )
-        st.rerun()
+mostrar_cabecera_fenologia(
+    opciones_superiores,
+    indice_activo,
+    navegar_fenologia
+)
 
 seccion_actual = st.session_state["navegacion_principal"]
-
-if seccion_actual == "Configuración de mi viña":
-    st.markdown("""
-    <style>
-    div.st-key-nav_configuracion button {
-        background-color: #84C55D !important;
-        border-color: #84C55D !important;
-        color: #17210F !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-
-# DM.7: ocultar visualmente la barra lateral
-st.markdown("""
-<style>
-    [data-testid="stSidebar"],
-    [data-testid="stSidebarCollapsedControl"] {
-        display: none !important;
-    }
-
-    [data-testid="stAppViewContainer"] > .main {
-        margin-left: 0 !important;
-    }
-
-    .block-container {
-        max-width: 100% !important;
-        padding-left: 2rem !important;
-        padding-right: 2rem !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("""
-<style>
-div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stDivider"]) {
-    margin-top: 0 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# DM.18: separador compacto bajo la navegación
-st.markdown("""
-<style>
-div.st-key-dm16_navegacion {
-    margin-bottom: 0 !important;
-}
-
-div.st-key-dm18_separador {
-    margin-top: -2.5rem !important;
-    margin-bottom: 0 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-with st.container(key="dm18_separador"):
-    st.markdown(
-        '<div style="border-top:1px solid #E0E0E0; width:100%;"></div>',
-        unsafe_allow_html=True
-    )
 
 # Se conservan temporalmente los controles existentes.
 with st.sidebar:
@@ -911,7 +897,7 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-    
+
     if usuario_actual["rol"] == "administrador":
 
         from vista_previa_csv import preparar_vista_previa_csv
@@ -1071,37 +1057,193 @@ with st.sidebar:
 
 # Pantalla inicial de la viña autenticada
 if seccion_actual == "FenologIA":
-    st.markdown("""
-    <style>
-    [data-testid="stSidebar"] {
-        display: none;
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
-    st.write("")
-    st.write("")
+    from estilos_fenologia import mostrar_titulo_inicio
 
-    st.markdown(
-        f"<h1 style='text-align:center; color:#000000;'>"
-        f"Viña «{__import__('html').escape(str(NOMBRE_VINA))}»"
-        f"</h1>",
-        unsafe_allow_html=True
+    mostrar_titulo_inicio(
+        NOMBRE_VINA,
+        "Monitoreo y gestión vitícola"
     )
 
-    izquierda, centro, derecha = st.columns([1, 1, 1])
+    accesos = [
+        (
+            "Monitoreo de plantas",
+            "Explora el mapa y consulta tus plantas.",
+            "Explorar mapa",
+            "Mapa y monitoreo de plantas"
+        ),
+        (
+            "Diagnóstico",
+            "Consulta indicadores y alertas de tu viña.",
+            "Ver diagnóstico",
+            "Resumen y diagnóstico inteligente"
+        ),
+        (
+            "Fotografías e IA",
+            "Consulta fotografías y resultados de análisis.",
+            "Abrir galería",
+            "Fotografías y análisis IA"
+        ),
+        (
+            "Meteorología",
+            "Consulta las condiciones meteorológicas.",
+            "Ver meteorología",
+            "Meteorología y precipitaciones"
+        ),
+    ]
 
-    with centro:
-        if st.button(
-            "🍇 Ir a diagnóstico",
-            key="boton_ir_diagnostico",
-            use_container_width=True,
-            type="primary"
+    for fila in range(0, len(accesos), 2):
+
+        columnas = st.columns(2, gap="medium")
+
+        for indice, acceso in enumerate(
+            accesos[fila:fila + 2]
         ):
-            st.session_state["navegacion_principal"] = (
-                "Resumen y diagnóstico inteligente"
+
+            titulo, descripcion, boton, destino = acceso
+
+            with columnas[indice]:
+
+                with st.container(border=True):
+
+                    st.markdown(f"### {titulo}")
+                    st.caption(descripcion)
+
+                    st.button(
+                        boton,
+                        key=f"inicio_acceso_{fila + indice}",
+                        type="primary",
+                        use_container_width=True,
+                        on_click=navegar_fenologia,
+                        args=(destino,)
+                    )
+
+    with st.container(border=True):
+        st.markdown("### Actualizar información")
+
+        col_xlsx, col_zip = st.columns(2)
+
+        with col_xlsx:
+
+            if st.button(
+                "Cargar xlsx fenologia",
+                key="inicio_cargar_xlsx",
+                type="primary",
+                use_container_width=True
+            ):
+                st.session_state["fenologia_acceso_carga"] = "xlsx"
+                navegar_fenologia("Mapa y monitoreo de plantas")
+                st.rerun()
+
+        with col_zip:
+
+            if st.button(
+                "Importar ZIP del dispositivo",
+                key="inicio_cargar_zip",
+                type="primary",
+                use_container_width=True
+            ):
+                st.session_state["fenologia_acceso_carga"] = "zip"
+                navegar_fenologia("Mapa y monitoreo de plantas")
+                st.rerun()
+
+
+    with st.container(border=True):
+
+        st.markdown("### Tutoriales y presentación")
+
+        st.caption(
+            "Conoce FenologIA y aprende a utilizar "
+            "cada sección de la plataforma."
+        )
+
+        @st.dialog("Centro de ayuda FenologIA", width="large")
+        def abrir_centro_ayuda():
+
+            st.markdown("### Bienvenido a FenologIA")
+
+            st.write(
+                "Plataforma de monitoreo vitícola que integra "
+                "información de plantas, meteorología, "
+                "fotografías e inteligencia artificial."
             )
-            st.rerun()
+
+            recursos = Path(__file__).resolve().parent / "tutoriales"
+
+            st.markdown("### Presentación de la plataforma")
+
+            presentacion = recursos / "presentacion.pdf"
+
+            if presentacion.is_file():
+                st.download_button(
+                    "Descargar presentación",
+                    data=presentacion.read_bytes(),
+                    file_name="Presentacion_FenologIA.pdf",
+                    mime="application/pdf",
+                    key="descargar_presentacion_fenologia"
+                )
+            else:
+                st.caption("Presentación próximamente disponible.")
+
+            st.divider()
+            st.markdown("### Videotutoriales")
+
+            secciones = [
+                (
+                    "Diagnóstico",
+                    "Interpreta los indicadores y alertas de tu viña.",
+                    "02_diagnostico.mp4"
+                ),
+                (
+                    "Mapa y monitoreo",
+                    "Consulta plantas e importa nuevas mediciones.",
+                    "03_monitoreo.mp4"
+                ),
+                (
+                    "Meteorología",
+                    "Consulta condiciones actuales, historial y pronóstico.",
+                    "04_meteorologia.mp4"
+                ),
+                (
+                    "Fotografías e IA",
+                    "Revisa fotografías y realiza análisis de racimos.",
+                    "05_fotografias_ia.mp4"
+                ),
+                (
+                    "Mi viña",
+                    "Configura y administra la información de tu viña.",
+                    "06_mi_vina.mp4"
+                )
+            ]
+
+            for titulo, descripcion, nombre in secciones:
+
+                with st.container(border=True):
+
+                    st.markdown(f"**{titulo}**")
+                    st.caption(descripcion)
+
+                    video = recursos / nombre
+
+                    if video.is_file():
+                        st.video(str(video))
+                    else:
+                        st.caption("Videotutorial próximamente disponible.")
+
+            if st.button(
+                "Cerrar ventana",
+                key="cerrar_centro_ayuda"
+            ):
+                st.rerun()
+
+        if st.button(
+            "Ver tutoriales y presentación",
+            key="inicio_centro_ayuda",
+            icon=":material/school:",
+            type="primary",
+            width="stretch"
+        ):
+            abrir_centro_ayuda()
 
     st.stop()
 
@@ -1141,91 +1283,787 @@ mostrar_configuracion = (
 
 if mostrar_configuracion:
 
-    # DM.30: estructura inicial de Mi perfil
-    panel_plantillas, panel_perfil = st.columns(
-        [0.7, 3.3],
-        gap="medium"
+    st.title("Mi viña")
+
+    st.caption(
+        f"{nombre_vina_actual} · Configuración y administración"
     )
 
-    with panel_plantillas:
-        st.markdown("### Plantillas de archivos")
+    opciones_configuracion = [
+        "Información general",
+        "Claro monitoreado",
+        "Configuración de indicadores",
+        "Plantillas"
+    ]
 
-        st.caption(
-            "Aquí estarán disponibles las plantillas "
-            "para importar datos a FenologIA."
-        )
+    if usuario_actual["rol"] == "administrador":
+        opciones_configuracion.append("Usuarios")
 
-        # DM.38: plantillas estructurales descargables
-        plantilla_individual = Path(
-            "plantillas_prueba/plantilla_registro_individual.csv"
-        )
-        plantilla_automatica = Path(
-            "plantillas_prueba/plantilla_generacion_automatica.csv"
-        )
+    pestanas_configuracion = st.tabs(
+        opciones_configuracion
+    )
 
-        st.markdown("**Registro individual de plantas**")
-        st.caption("CSV para registrar plantas específicas.")
+    with pestanas_configuracion[0]:
+        # =========================================================
+        # UBICACIÓN GEOGRÁFICA DE LA VIÑA
+        # =========================================================
 
-        if plantilla_individual.is_file():
-            st.download_button(
-                "Descargar CSV individual",
-                icon=":material/download:",
-                data=plantilla_individual.read_bytes(),
-                file_name="plantilla_registro_individual.csv",
-                mime="text/csv",
-                key="dm38_descargar_individual",
-                use_container_width=True
+        vina_actual = consultar_vina(VINA_ID_ACTUAL)
+
+        if vina_actual is not None:
+
+            nombre_vina_actual = vina_actual[1]
+            ubicacion_guardada = vina_actual[2]
+            latitud_guardada = vina_actual[3]
+            longitud_guardada = vina_actual[4]
+
+            from regiones_chile import (
+                obtener_regiones,
+                obtener_comunas
             )
-        else:
-            st.warning("Plantilla individual no disponible.")
 
-        st.markdown("**Generación automática de plantas**")
-        st.caption("CSV para registrar cuarteles y filas.")
+            from database import consultar_ubicacion_detallada
 
-        if plantilla_automatica.is_file():
-            st.download_button(
-                "Descargar CSV automático",
-                icon=":material/download:",
-                data=plantilla_automatica.read_bytes(),
-                file_name="plantilla_generacion_automatica.csv",
-                mime="text/csv",
-                key="dm38_descargar_automatica",
-                use_container_width=True
+            import math
+
+            detalle = consultar_ubicacion_detallada(
+                VINA_ID_ACTUAL
             )
-        else:
-            st.warning("Plantilla automática no disponible.")
 
-        st.markdown("**Mediciones fenológicas**")
-        st.caption(
-            "XLSX para registrar las cinco variables "
-            "de monitoreo por planta y fecha."
-        )
+            prefijo = f"geo_{VINA_ID_ACTUAL}_"
 
-        plantilla_fenologia = Path(
-            "plantillas/FenologIA_Plantilla_Mediciones.xlsx"
-        )
+            configurada = (
+                latitud_guardada is not None
+                and longitud_guardada is not None
+            )
 
-        if plantilla_fenologia.is_file():
-            st.download_button(
-                "Descargar XLSX fenologia",
-                icon=":material/download:",
-                data=plantilla_fenologia.read_bytes(),
-                file_name="FenologIA_Plantilla_Mediciones.xlsx",
-                mime=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "spreadsheetml.sheet"
+            es_admin = usuario_actual["rol"] == "administrador"
+
+            st.subheader("Ubicación de mi viña")
+
+            st.caption(
+                "Define la ubicación exacta del predio para "
+                "personalizar el mapa y las consultas a Open-Meteo."
+            )
+
+            if configurada:
+
+                st.success("Ubicación geográfica registrada.")
+
+                c1, c2 = st.columns(2)
+
+                c1.metric(
+                    "Latitud",
+                    f"{latitud_guardada:.6f}"
+                )
+
+                c2.metric(
+                    "Longitud",
+                    f"{longitud_guardada:.6f}"
+                )
+
+                st.write(
+                    "**Región:**",
+                    detalle["region"] or "Pendiente de completar"
+                )
+
+                st.write(
+                    "**Comuna:**",
+                    detalle["comuna"] or "Pendiente de completar"
+                )
+
+                st.write(
+                    "**Dirección:**",
+                    detalle["direccion"] or ubicacion_guardada
+                )
+
+            puede_configurar = (
+                es_admin and not configurada
+            )
+
+            if configurada:
+
+                st.caption(
+                    "Ubicación definitiva registrada. "
+                    "No se permite modificarla."
+                )
+
+            clave_lat = prefijo + "lat"
+            clave_lon = prefijo + "lon"
+            clave_version = prefijo + "version"
+
+            st.session_state.setdefault(
+                clave_lat, latitud_guardada
+            )
+
+            st.session_state.setdefault(
+                clave_lon, longitud_guardada
+            )
+
+            st.session_state.setdefault(
+                clave_version, 0
+            )
+
+            if puede_configurar:
+
+                st.markdown("#### Datos geográficos")
+
+                st.text_input(
+                    "País",
+                    value="Chile",
+                    disabled=True,
+                    key=prefijo + "pais"
+                )
+
+                regiones = obtener_regiones()
+
+                region = st.selectbox(
+                    "Región",
+                    regiones,
+                    index=(
+                        regiones.index(detalle["region"])
+                        if detalle["region"] in regiones
+                        else None
+                    ),
+                    placeholder="Selecciona una región",
+                    key=prefijo + "region"
+                )
+
+                comunas = obtener_comunas(region)
+
+                comuna = st.selectbox(
+                    "Comuna",
+                    comunas,
+                    index=(
+                        comunas.index(detalle["comuna"])
+                        if detalle["comuna"] in comunas
+                        else None
+                    ),
+                    placeholder="Selecciona una comuna",
+                    disabled=not region,
+                    key=prefijo + "comuna_" + str(region)
+                )
+
+                direccion = st.text_input(
+                    "Dirección exacta o referencia del predio",
+                    value=detalle["direccion"] or "",
+                    placeholder="Camino, parcela, kilómetro o sector",
+                    key=prefijo + "direccion"
+                )
+
+                consulta = ", ".join(
+                    parte for parte in [
+                        direccion, comuna, region, "Chile"
+                    ] if parte
+                )
+
+                if st.button(
+                    "Buscar ubicación en el mapa",
+                    key=prefijo + "buscar",
+                    disabled=not (
+                        region and comuna and direccion.strip()
+                    )
+                ):
+
+                    try:
+
+                        geolocalizador = Nominatim(
+                            user_agent="FenologIA_geolocalizacion",
+                            ssl_context=ssl.create_default_context(
+                                cafile=certifi.where()
+                            )
+                        )
+
+                        with st.spinner("Buscando ubicación..."):
+
+                            resultado = geolocalizador.geocode(
+                                consulta,
+                                timeout=15,
+                                country_codes="cl"
+                            )
+
+                        if resultado:
+
+                            st.session_state[clave_lat] = float(
+                                resultado.latitude
+                            )
+
+                            st.session_state[clave_lon] = float(
+                                resultado.longitude
+                            )
+
+                            st.session_state[clave_version] += 1
+
+                            st.success(
+                                "Ubicación encontrada. "
+                                "Verifica el marcador en el mapa."
+                            )
+
+                        else:
+
+                            st.warning(
+                                "No encontramos la dirección exacta. "
+                                "Puedes marcar el predio en el mapa "
+                                "o ingresar sus coordenadas GPS."
+                            )
+
+                    except Exception:
+
+                        st.warning(
+                            "La búsqueda no está disponible. "
+                            "Puedes utilizar el mapa o las coordenadas."
+                        )
+
+                with st.expander(
+                    "Ingresar coordenadas GPS (opcional)"
+                ):
+
+                    c1, c2 = st.columns(2)
+
+                    lat_manual = c1.text_input(
+                        "Latitud",
+                        placeholder="-34.650000",
+                        key=prefijo + "lat_manual"
+                    )
+
+                    lon_manual = c2.text_input(
+                        "Longitud",
+                        placeholder="-71.380000",
+                        key=prefijo + "lon_manual"
+                    )
+
+                    if st.button(
+                        "Aplicar coordenadas",
+                        key=prefijo + "aplicar_gps"
+                    ):
+
+                        try:
+
+                            lat = float(
+                                lat_manual.replace(",", ".")
+                            )
+
+                            lon = float(
+                                lon_manual.replace(",", ".")
+                            )
+
+                            if not (
+                                math.isfinite(lat)
+                                and math.isfinite(lon)
+                                and -90 <= lat <= 90
+                                and -180 <= lon <= 180
+                            ):
+
+                                raise ValueError()
+
+                            st.session_state[clave_lat] = lat
+                            st.session_state[clave_lon] = lon
+                            st.session_state[clave_version] += 1
+
+                            st.success("Coordenadas aplicadas.")
+
+                        except ValueError:
+
+                            st.error(
+                                "Ingresa coordenadas GPS válidas."
+                            )
+
+            lat_actual = (
+                st.session_state[clave_lat]
+                if puede_configurar
+                else latitud_guardada
+            )
+
+            lon_actual = (
+                st.session_state[clave_lon]
+                if puede_configurar
+                else longitud_guardada
+            )
+
+            hay_coordenadas = (
+                lat_actual is not None
+                and lon_actual is not None
+            )
+
+            centro = (
+                [lat_actual, lon_actual]
+                if hay_coordenadas
+                else [-35.7, -71.5]
+            )
+
+            st.markdown("#### Ubicación en el mapa")
+
+            if puede_configurar:
+
+                st.caption(
+                    "Haz clic sobre el mapa para ajustar "
+                    "la ubicación exacta del viñedo."
+                )
+
+            mapa_ubicacion = folium.Map(
+                location=centro,
+                zoom_start=16 if hay_coordenadas else 5,
+                tiles=None,
+                control_scale=True
+            )
+
+            folium.TileLayer(
+                tiles=(
+                    "https://server.arcgisonline.com/ArcGIS/rest/"
+                    "services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 ),
-                key="dm42_descargar_xlsx_fenologia",
-                use_container_width=True
-            )
-        else:
-            st.warning(
-                "Plantilla de mediciones no disponible."
+                attr="Esri World Imagery",
+                name="Satélite",
+                overlay=False
+            ).add_to(mapa_ubicacion)
+
+            folium.TileLayer(
+                "OpenStreetMap",
+                name="Mapa de calles"
+            ).add_to(mapa_ubicacion)
+
+            folium.LayerControl().add_to(mapa_ubicacion)
+
+            if hay_coordenadas:
+
+                folium.Marker(
+                    [lat_actual, lon_actual],
+                    tooltip="Ubicación de la viña",
+                    icon=folium.Icon(
+                        color="green",
+                        icon="leaf"
+                    )
+                ).add_to(mapa_ubicacion)
+
+            resultado_mapa = st_folium(
+                mapa_ubicacion,
+                width=900,
+                height=500,
+                returned_objects=(
+                    ["last_clicked"]
+                    if puede_configurar else []
+                ),
+                key=(
+                    prefijo + "mapa_" +
+                    str(st.session_state[clave_version])
+                )
             )
 
-    with panel_perfil:
+            if puede_configurar and resultado_mapa:
+
+                clic = resultado_mapa.get("last_clicked")
+
+                if clic:
+
+                    nueva_lat = round(float(clic["lat"]), 7)
+                    nueva_lon = round(float(clic["lng"]), 7)
+
+                    if (nueva_lat, nueva_lon) != (
+                        lat_actual, lon_actual
+                    ):
+
+                        st.session_state[clave_lat] = nueva_lat
+                        st.session_state[clave_lon] = nueva_lon
+                        st.session_state[clave_version] += 1
+
+                        st.rerun()
+
+            if hay_coordenadas:
+
+                st.caption(
+                    f"Coordenadas seleccionadas: "
+                    f"{lat_actual:.6f}, {lon_actual:.6f}"
+                )
+
+            if puede_configurar:
+
+                listo = bool(
+                    region
+                    and comuna
+                    and direccion.strip()
+                    and hay_coordenadas
+                )
+
+                confirmado = st.checkbox(
+                    "Confirmo que el marcador corresponde "
+                    "a la ubicación exacta de mi viña.",
+                    key=(
+                        prefijo + "confirmar_" +
+                        str(st.session_state[clave_version]) +
+                        "_" + consulta
+                    ),
+                    disabled=not listo
+                )
+
+                if st.button(
+                    "Guardar ubicación de mi viña",
+                    type="primary",
+                    disabled=not (listo and confirmado),
+                    key=prefijo + "guardar"
+                ):
+
+                    try:
+
+                        actualizar_ubicacion_vina(
+                            VINA_ID_ACTUAL,
+                            consulta,
+                            lat_actual,
+                            lon_actual,
+                            usuario_id=usuario_actual["usuario_id"],
+                            region=region,
+                            comuna=comuna,
+                            direccion=direccion,
+                            permitir_modificacion=False
+                        )
+
+                        st.session_state[clave_lat] = lat_actual
+                        st.session_state[clave_lon] = lon_actual
+
+                        st.success(
+                            "Ubicación guardada correctamente."
+                        )
+
+                        st.rerun()
+
+                    except Exception as e:
+
+                        st.error(
+                            f"No se pudo guardar la ubicación: {e}"
+                        )
+
+            elif not configurada:
+
+                st.info(
+                    "El administrador debe registrar "
+                    "la ubicación de esta viña."
+                )
+
+        # =========================================================
+        # INFORMACIÓN METEOROLÓGICA
+        # =========================================================
+
+
+        st.divider()
+
+        st.markdown("### Información meteorológica")
+
+        st.caption(
+            "Consulta las condiciones meteorológicas, los registros "
+            "históricos y los informes de precipitación."
+        )
+
+        st.button(
+            "Consultar meteorología",
+            key="mi_vina_ir_meteorologia",
+            type="primary",
+            on_click=navegar_fenologia,
+            args=("Meteorología y precipitaciones",)
+        )
+
+
+
         if usuario_actual["rol"] == "administrador":
-            with st.expander("👥 Administrar usuarios"):
+
+            from investigacion import mostrar_autorizacion
+
+            st.divider()
+
+            mostrar_autorizacion(
+                usuario_actual["usuario_id"],
+                VINA_ID_ACTUAL
+            )
+
+    with pestanas_configuracion[1]:
+
+
+        st.subheader("Claro monitoreado")
+
+        st.caption(
+            "Cada cuartel puede tener un claro monitoreado "
+            "compuesto por exactamente seis plantas."
+        )
+
+        with conectar() as conexion:
+            cuarteles_claro = [
+                fila[0]
+                for fila in conexion.execute("""
+                    SELECT DISTINCT cuartel
+                    FROM plantas
+                    WHERE vina_id = ?
+                      AND cuartel IS NOT NULL
+                    ORDER BY cuartel
+                """, (VINA_ID_ACTUAL,)).fetchall()
+            ]
+
+        if not cuarteles_claro:
+            st.info(
+                "Esta viña todavía no tiene plantas registradas."
+            )
+
+        else:
+            cuartel_claro = st.selectbox(
+                "Selecciona el cuartel",
+                cuarteles_claro,
+                key=f"df283_cuartel_{VINA_ID_ACTUAL}"
+            )
+
+            configuracion_actual = consultar_claro_monitoreado(
+                VINA_ID_ACTUAL,
+                cuartel_claro
+            )
+
+            with conectar() as conexion:
+                plantas_disponibles = conexion.execute("""
+                    SELECT id, codigo_planta, fila,
+                           numero_planta, variedad
+                    FROM plantas
+                    WHERE vina_id = ?
+                      AND cuartel = ?
+                    ORDER BY fila, numero_planta, codigo_planta
+                """, (
+                    VINA_ID_ACTUAL,
+                    cuartel_claro
+                )).fetchall()
+
+            etiquetas_plantas = {
+                planta[0]: (
+                    f"{planta[1]} — Fila {planta[2]}, "
+                    f"Planta {planta[3]} — {planta[4]}"
+                )
+                for planta in plantas_disponibles
+            }
+
+            ids_disponibles = list(etiquetas_plantas)
+
+            es_admin_claro = (
+                usuario_actual["rol"] == "administrador"
+            )
+
+            if configuracion_actual:
+                st.success(
+                    "Este cuartel tiene un claro monitoreado "
+                    "configurado."
+                )
+
+                for planta in configuracion_actual:
+                    st.write(
+                        f"**Posición {planta[0]}:** "
+                        f"{planta[2]}"
+                    )
+
+            else:
+                st.info(
+                    "Este cuartel todavía no tiene un "
+                    "claro monitoreado configurado."
+                )
+
+            if es_admin_claro:
+
+                if len(ids_disponibles) < 6:
+                    st.warning(
+                        "Se necesitan al menos seis plantas "
+                        "registradas para configurar el claro."
+                    )
+
+                else:
+                    st.markdown(
+                        "#### Seleccionar las seis plantas"
+                    )
+
+                    st.caption(
+                        "Selecciona las plantas reales que "
+                        "monitoreará el dispositivo. "
+                        "No se asignan automáticamente."
+                    )
+
+                    with st.form(
+                        key=(
+                            f"df283_configuracion_claro_"
+                            f"{VINA_ID_ACTUAL}_{cuartel_claro}"
+                        )
+                    ):
+
+                        seleccion_claro = []
+
+                        for posicion in range(1, 7):
+
+                            valor_actual = None
+
+                            if configuracion_actual:
+                                valor_actual = (
+                                    configuracion_actual[
+                                        posicion - 1
+                                    ][1]
+                                )
+
+                            opciones = [None] + ids_disponibles
+
+                            indice_actual = (
+                                opciones.index(valor_actual)
+                                if valor_actual in opciones
+                                else 0
+                            )
+
+                            elegido = st.selectbox(
+                                f"Planta {posicion}",
+                                opciones,
+                                index=indice_actual,
+                                format_func=lambda identificador: (
+                                    etiquetas_plantas.get(
+                                        identificador,
+                                        "Seleccionar planta"
+                                    )
+                                    if identificador is not None
+                                    else "Seleccionar planta"
+                                ),
+                                key=(
+                                    f"df283_planta_"
+                                    f"{VINA_ID_ACTUAL}_"
+                                    f"{cuartel_claro}_"
+                                    f"{posicion}"
+                                )
+                            )
+
+                            seleccion_claro.append(elegido)
+
+                        guardar_claro = st.form_submit_button(
+                            "Guardar claro monitoreado"
+                        )
+
+                    if guardar_claro:
+
+                        if any(
+                            identificador is None
+                            for identificador in seleccion_claro
+                        ):
+                            st.warning(
+                                "Debes seleccionar las seis plantas."
+                            )
+
+                        elif len(set(seleccion_claro)) != 6:
+                            st.warning(
+                                "Las seis plantas deben ser distintas."
+                            )
+
+                        else:
+                            try:
+                                guardar_claro_monitoreado(
+                                    VINA_ID_ACTUAL,
+                                    cuartel_claro,
+                                    seleccion_claro,
+                                    usuario_actual["usuario_id"]
+                                )
+
+                                st.success(
+                                    "Claro monitoreado guardado "
+                                    "correctamente."
+                                )
+
+                                st.rerun()
+
+                            except (ValueError, PermissionError) as e:
+                                st.error(str(e))
+
+                            except Exception:
+                                st.error(
+                                    "No fue posible guardar el claro. "
+                                    "Revisa la configuración."
+                                )
+
+            else:
+                st.caption(
+                    "Solo el administrador de esta viña "
+                    "puede configurar o modificar el claro."
+                )
+
+    with pestanas_configuracion[2]:
+
+        st.subheader("Configuración de indicadores")
+
+        st.caption(
+            "Define los rangos de referencia y los "
+            "criterios de alerta de tu viña."
+        )
+
+        from interfaz_indicadores import (
+            mostrar_configuracion_indicadores
+        )
+
+        mostrar_configuracion_indicadores(
+            usuario_actual,
+            VINA_ID_ACTUAL
+        )
+
+    with pestanas_configuracion[3]:
+
+        st.subheader("Plantillas de archivos")
+        st.caption("Descarga los formatos para importar información.")
+
+        plantillas_disponibles = [
+            (
+                "Mediciones fenológicas",
+                "Mediciones por planta y fecha.",
+                "plantillas/FenologIA_Plantilla_Mediciones.xlsx",
+                "Descargar XLSX fenologia",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "dm42_descargar_xlsx_fenologia"
+            )
+        ]
+
+        if usuario_actual["rol"] == "administrador":
+            plantillas_disponibles.extend([
+                (
+                    "Registro individual",
+                    "Registro de plantas específicas.",
+                    "plantillas_prueba/plantilla_registro_individual.csv",
+                    "Descargar CSV individual",
+                    "text/csv",
+                    "dm38_descargar_individual"
+                ),
+                (
+                    "Generación automática",
+                    "Registro de cuarteles y filas.",
+                    "plantillas_prueba/plantilla_generacion_automatica.csv",
+                    "Descargar CSV automático",
+                    "text/csv",
+                    "dm38_descargar_automatica"
+                )
+            ])
+
+        columnas_plantillas = st.columns(3)
+
+        for columna, plantilla in zip(
+            columnas_plantillas,
+            plantillas_disponibles
+        ):
+            titulo, descripcion, ruta, etiqueta, mime, clave = plantilla
+
+            with columna:
+                with st.container(border=True):
+                    st.markdown(f"### {titulo}")
+                    st.caption(descripcion)
+
+                    ruta_plantilla = Path(ruta)
+
+                    if ruta_plantilla.is_file():
+                        st.download_button(
+                            etiqueta,
+                            icon=":material/download:",
+                            data=ruta_plantilla.read_bytes(),
+                            file_name=ruta_plantilla.name,
+                            mime=mime,
+                            key=clave,
+                            type="primary",
+                            use_container_width=True
+                        )
+                    else:
+                        st.warning("Plantilla no disponible.")
+
+
+    if usuario_actual["rol"] == "administrador":
+        with pestanas_configuracion[4]:
+            if usuario_actual["rol"] == "administrador":
+                st.subheader("Usuarios y permisos")
 
                 st.markdown("#### Crear nuevo usuario")
 
@@ -1302,1134 +2140,77 @@ if mostrar_configuracion:
                         "No hay usuarios registrados en esta viña."
                     )
 
-    # Los apartados actuales permanecen temporalmente
-    # en su posición original hasta validar el diseño.
 
-
-    # =========================================================
-    # DF.2.8.3: CONFIGURACIÓN DEL CLARO MONITOREADO
-    # =========================================================
-
-    with panel_perfil:
-
-        st.divider()
-
-        with st.expander(
-            "🌱 Configuración del claro monitoreado",
-            expanded=False
-        ):
-
-            st.caption(
-                "Cada cuartel puede tener un claro monitoreado "
-                "compuesto por exactamente seis plantas."
-            )
-
-            with conectar() as conexion:
-                cuarteles_claro = [
-                    fila[0]
-                    for fila in conexion.execute("""
-                        SELECT DISTINCT cuartel
-                        FROM plantas
-                        WHERE vina_id = ?
-                          AND cuartel IS NOT NULL
-                        ORDER BY cuartel
-                    """, (VINA_ID_ACTUAL,)).fetchall()
-                ]
-
-            if not cuarteles_claro:
-                st.info(
-                    "Esta viña todavía no tiene plantas registradas."
-                )
-
-            else:
-                cuartel_claro = st.selectbox(
-                    "Selecciona el cuartel",
-                    cuarteles_claro,
-                    key=f"df283_cuartel_{VINA_ID_ACTUAL}"
-                )
-
-                configuracion_actual = consultar_claro_monitoreado(
-                    VINA_ID_ACTUAL,
-                    cuartel_claro
-                )
-
-                with conectar() as conexion:
-                    plantas_disponibles = conexion.execute("""
-                        SELECT id, codigo_planta, fila,
-                               numero_planta, variedad
-                        FROM plantas
-                        WHERE vina_id = ?
-                          AND cuartel = ?
-                        ORDER BY fila, numero_planta, codigo_planta
-                    """, (
-                        VINA_ID_ACTUAL,
-                        cuartel_claro
-                    )).fetchall()
-
-                etiquetas_plantas = {
-                    planta[0]: (
-                        f"{planta[1]} — Fila {planta[2]}, "
-                        f"Planta {planta[3]} — {planta[4]}"
-                    )
-                    for planta in plantas_disponibles
-                }
-
-                ids_disponibles = list(etiquetas_plantas)
-
-                es_admin_claro = (
-                    usuario_actual["rol"] == "administrador"
-                )
-
-                if configuracion_actual:
-                    st.success(
-                        "Este cuartel tiene un claro monitoreado "
-                        "configurado."
-                    )
-
-                    for planta in configuracion_actual:
-                        st.write(
-                            f"**Posición {planta[0]}:** "
-                            f"{planta[2]}"
-                        )
-
-                else:
-                    st.info(
-                        "Este cuartel todavía no tiene un "
-                        "claro monitoreado configurado."
-                    )
-
-                if es_admin_claro:
-
-                    if len(ids_disponibles) < 6:
-                        st.warning(
-                            "Se necesitan al menos seis plantas "
-                            "registradas para configurar el claro."
-                        )
-
-                    else:
-                        st.markdown(
-                            "#### Seleccionar las seis plantas"
-                        )
-
-                        st.caption(
-                            "Selecciona las plantas reales que "
-                            "monitoreará el dispositivo. "
-                            "No se asignan automáticamente."
-                        )
-
-                        with st.form(
-                            key=(
-                                f"df283_configuracion_claro_"
-                                f"{VINA_ID_ACTUAL}_{cuartel_claro}"
-                            )
-                        ):
-
-                            seleccion_claro = []
-
-                            for posicion in range(1, 7):
-
-                                valor_actual = None
-
-                                if configuracion_actual:
-                                    valor_actual = (
-                                        configuracion_actual[
-                                            posicion - 1
-                                        ][1]
-                                    )
-
-                                opciones = [None] + ids_disponibles
-
-                                indice_actual = (
-                                    opciones.index(valor_actual)
-                                    if valor_actual in opciones
-                                    else 0
-                                )
-
-                                elegido = st.selectbox(
-                                    f"Planta {posicion}",
-                                    opciones,
-                                    index=indice_actual,
-                                    format_func=lambda identificador: (
-                                        etiquetas_plantas.get(
-                                            identificador,
-                                            "Seleccionar planta"
-                                        )
-                                        if identificador is not None
-                                        else "Seleccionar planta"
-                                    ),
-                                    key=(
-                                        f"df283_planta_"
-                                        f"{VINA_ID_ACTUAL}_"
-                                        f"{cuartel_claro}_"
-                                        f"{posicion}"
-                                    )
-                                )
-
-                                seleccion_claro.append(elegido)
-
-                            guardar_claro = st.form_submit_button(
-                                "Guardar claro monitoreado"
-                            )
-
-                        if guardar_claro:
-
-                            if any(
-                                identificador is None
-                                for identificador in seleccion_claro
-                            ):
-                                st.warning(
-                                    "Debes seleccionar las seis plantas."
-                                )
-
-                            elif len(set(seleccion_claro)) != 6:
-                                st.warning(
-                                    "Las seis plantas deben ser distintas."
-                                )
-
-                            else:
-                                try:
-                                    guardar_claro_monitoreado(
-                                        VINA_ID_ACTUAL,
-                                        cuartel_claro,
-                                        seleccion_claro,
-                                        usuario_actual["usuario_id"]
-                                    )
-
-                                    st.success(
-                                        "Claro monitoreado guardado "
-                                        "correctamente."
-                                    )
-
-                                    st.rerun()
-
-                                except (ValueError, PermissionError) as e:
-                                    st.error(str(e))
-
-                                except Exception:
-                                    st.error(
-                                        "No fue posible guardar el claro. "
-                                        "Revisa la configuración."
-                                    )
-
-                else:
-                    st.caption(
-                        "Solo el administrador de esta viña "
-                        "puede configurar o modificar el claro."
-                    )
-
-    with panel_perfil:
-        # =========================================================
-        # UBICACIÓN GEOGRÁFICA DE LA VIÑA
-        # =========================================================
-
-        vina_actual = consultar_vina(VINA_ID_ACTUAL)
-
-        if vina_actual is not None:
-
-            nombre_vina_actual = vina_actual[1]
-            ubicacion_guardada = vina_actual[2]
-            latitud_guardada = vina_actual[3]
-            longitud_guardada = vina_actual[4]
-
-            # Determinar si la ubicación ya fue registrada
-            ubicacion_configurada = (
-                latitud_guardada is not None
-                and longitud_guardada is not None
-            )
-
-            clave_lat = f"ubicacion_lat_{VINA_ID_ACTUAL}"
-            clave_lon = f"ubicacion_lon_{VINA_ID_ACTUAL}"
-            clave_nombre = f"ubicacion_nombre_{VINA_ID_ACTUAL}"
-
-            # Inicializar coordenadas solo una vez por viña
-            if clave_lat not in st.session_state:
-                st.session_state[clave_lat] = latitud_guardada
-
-            if clave_lon not in st.session_state:
-                st.session_state[clave_lon] = longitud_guardada
-
-            if clave_nombre not in st.session_state:
-                st.session_state[clave_nombre] = (
-                    ubicacion_guardada or "Por definir"
-                )
-
-            st.header("Ubicación de mi viña")
-            st.caption(
-                f"Configuración geográfica de {nombre_vina_actual}"
-            )
-
-            es_admin = usuario_actual["rol"] == "administrador"
-
-            # Solo permitir configurar si todavía no existe ubicación
-            puede_configurar = es_admin and not ubicacion_configurada
-
-            if puede_configurar:
-
-                with st.form("buscar_ubicacion_vina"):
-                    consulta_lugar = st.text_input(
-                        "Busca la localidad o dirección de tu viña",
-                        placeholder="Ej: Santa Cruz, Región de O'Higgins, Chile"
-                    )
-
-                    buscar = st.form_submit_button("Buscar ubicación")
-
-                if buscar:
-                    if not consulta_lugar.strip():
-                        st.warning("Escribe una localidad o dirección.")
-                    else:
-                        try:
-                            geolocalizador = Nominatim(
-                                user_agent="plataforma_monitoreo_viticola",
-                                ssl_context=ssl.create_default_context(
-                                    cafile=certifi.where()
-                                )
-                            )
-
-                            resultado = geolocalizador.geocode(
-                                consulta_lugar,
-                                timeout=10,
-                                country_codes="cl"
-                            )
-
-                            if resultado:
-                                st.session_state[clave_lat] = float(
-                                    resultado.latitude
-                                )
-                                st.session_state[clave_lon] = float(
-                                    resultado.longitude
-                                )
-                                st.session_state[clave_nombre] = (
-                                    resultado.address
-                                )
-                                st.rerun()
-                            else:
-                                st.warning(
-                                    "No encontramos ese lugar. "
-                                    "Prueba con otra dirección o localidad."
-                                )
-
-                        except Exception as e:
-                            st.error(
-                                f"No se pudo buscar la ubicación: {e}"
-                            )
-
-            lat_actual = st.session_state[clave_lat]
-            lon_actual = st.session_state[clave_lon]
-
-            if lat_actual is not None and lon_actual is not None:
-                centro_mapa = [lat_actual, lon_actual]
-                zoom_mapa = 15
-            else:
-                centro_mapa = [-35.7, -71.5]
-                zoom_mapa = 5
-
-            mapa_ubicacion = folium.Map(
-                location=centro_mapa,
-                zoom_start=zoom_mapa,
-                control_scale=True
-            )
-
-            if lat_actual is not None and lon_actual is not None:
-                folium.Marker(
-                    [lat_actual, lon_actual],
-                    tooltip="Ubicación de la viña",
-                    popup=st.session_state[clave_nombre],
-                    icon=folium.Icon(color="green", icon="leaf")
-                ).add_to(mapa_ubicacion)
-
-            if puede_configurar:
-                st.caption(
-                    "Haz clic sobre el mapa para marcar la ubicación "
-                    "exacta del predio."
-                )
-            elif ubicacion_configurada:
-                st.caption(
-                    "Ubicación definitiva registrada. "
-                    "El mapa está disponible solo para consulta."
-                )
-            else:
-                st.caption(
-                    "El administrador todavía no ha definido "
-                    "la ubicación de esta viña."
-                )
-
-            resultado_mapa = st_folium(
-                mapa_ubicacion,
-                width=900,
-                height=450,
-                returned_objects=(
-                    ["last_clicked"] if puede_configurar else []
-                ),
-                key=f"mapa_ubicacion_{VINA_ID_ACTUAL}"
-            )
-
-            if puede_configurar and resultado_mapa:
-                clic = resultado_mapa.get("last_clicked")
-
-                if clic:
-                    nueva_lat = round(float(clic["lat"]), 7)
-                    nueva_lon = round(float(clic["lng"]), 7)
-
-                    clic_anterior = st.session_state.get(
-                        f"ultimo_clic_{VINA_ID_ACTUAL}"
-                    )
-
-                    nuevo_clic = (nueva_lat, nueva_lon)
-
-                    if nuevo_clic != clic_anterior:
-                        st.session_state[f"ultimo_clic_{VINA_ID_ACTUAL}"] = nuevo_clic
-
-                        st.session_state[clave_lat] = nueva_lat
-                        st.session_state[clave_lon] = nueva_lon
-                        st.session_state[clave_nombre] = (
-                            "Ubicación seleccionada en el mapa"
-                        )
-
-                        st.rerun()
-
-            if lat_actual is not None and lon_actual is not None:
-                st.write(f"**Ubicación:** {st.session_state[clave_nombre]}")
-                st.write(f"**Latitud:** {lat_actual:.6f}")
-                st.write(f"**Longitud:** {lon_actual:.6f}")
-
-            if puede_configurar:
-
-                if st.button(
-                    "Guardar ubicación",
-                    key=f"guardar_ubicacion_{VINA_ID_ACTUAL}_{round(lat_actual or 0, 5)}_{round(lon_actual or 0, 5)}"
-                ):
-                    try:
-                        actualizar_ubicacion_vina(
-                            VINA_ID_ACTUAL,
-                            st.session_state[clave_nombre],
-                            st.session_state[clave_lat],
-                            st.session_state[clave_lon]
-                        )
-
-                        st.success(
-                            "¡Ubicación de la viña guardada correctamente!"
-                        )
-                        st.rerun()
-
-                    except Exception as e:
-                        st.error(
-                            f"No se pudo guardar la ubicación: {e}"
-                        )
-
-        # =========================================================
-
-        # =========================================================
-        # ESTACIÓN METEOROLÓGICA RECOMENDADA
-        # =========================================================
-
-        st.divider()
-        st.subheader("Estación meteorológica asociada")
-
-        if latitud_guardada is not None and longitud_guardada is not None:
-
-            try:
-                estaciones_cercanas = consultar_estaciones_cercanas(
-                    VINA_ID_ACTUAL
-                )
-
-                if estaciones_cercanas:
-                    estacion_recomendada = estaciones_cercanas[0]
-
-                    st.success("Estación más cercana encontrada")
-
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.metric(
-                            "Estación",
-                            estacion_recomendada["nombre"]
-                        )
-
-                        st.write(
-                            "**Institución:**",
-                            estacion_recomendada["institucion"]
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Distancia a la viña",
-                            f'{estacion_recomendada["distancia_km"]} km'
-                        )
-
-                        st.write(
-                            "**Fuente:**",
-                            estacion_recomendada["fuente_datos"]
-                        )
-
-                    st.caption(
-                        "Estación recomendada según distancia geográfica. "
-                        "La selección definitiva requiere validar su "
-                        "actividad y disponibilidad de datos."
-                    )
-
-                else:
-                    st.warning(
-                        "No hay estaciones meteorológicas registradas "
-                        "para esta ubicación."
-                    )
-
-            except Exception as e:
-                st.warning(
-                    f"No se pudo consultar las estaciones: {e}"
-                )
-
-        else:
-            st.info(
-                "Registra la ubicación de tu viña para buscar "
-                "automáticamente las estaciones meteorológicas cercanas."
-            )
-
-    # =========================================================
-
-
-# =========================================================
-# PANEL DE INFORMACIÓN METEOROLÓGICA
 # =========================================================
 
 if seccion_actual == "Meteorología y precipitaciones":
 
-    st.divider()
-    st.header("Monitoreo meteorológico")
-
-    if latitud_guardada is not None and longitud_guardada is not None:
-
-        try:
-            seleccion_meteo = seleccionar_estacion_con_historial(
-                VINA_ID_ACTUAL
-            )
-
-            if seleccion_meteo:
-
-                estacion_datos = seleccion_meteo["estacion"]
-                datos_meteo = seleccion_meteo["registros"]
-                datos_referencia = seleccion_meteo["es_referencia"]
-                estacion_principal = seleccion_meteo["estacion_mas_cercana"]
-
-                if datos_meteo:
-
-                    col_cercana, col_historial = st.columns(2)
-
-                    with col_cercana:
-                        with st.container(border=True):
-                            st.caption("ESTACIÓN MÁS CERCANA")
-                            st.write(
-                                f"**{estacion_principal['nombre']}**"
-                            )
-                            st.caption(
-                                f"Distancia a la viña: "
-                                f"{estacion_principal['distancia_km']} km"
-                            )
-
-                    with col_historial:
-                        with st.container(border=True):
-                            st.caption("ESTACIÓN PARA ANÁLISIS HISTÓRICO")
-                            st.write(
-                                f"**{estacion_datos['nombre']}**"
-                            )
-                            st.caption(
-                                f"Distancia a la viña: "
-                                f"{estacion_datos['distancia_km']} km"
-                            )
-
-                    df_meteo = pd.DataFrame(datos_meteo)
-                    df_meteo["fecha"] = pd.to_datetime(
-                        df_meteo["fecha"]
-                    )
-                    df_meteo = df_meteo.sort_values("fecha")
-
-                    fecha_ultimo_registro = seleccion_meteo[
-                        "fecha_ultimo_registro"
-                    ]
-                    dias_desde_ultimo = seleccion_meteo[
-                        "dias_desde_ultimo"
-                    ]
-
-                    st.caption(
-                        f"Último registro meteorológico: "
-                        f"{fecha_ultimo_registro.date()} · "
-                        f"Antigüedad: {dias_desde_ultimo} días"
-                    )
-
-                    if dias_desde_ultimo > 7:
-                        st.warning(
-                            "Los registros meteorológicos disponibles "
-                            "están desactualizados. Se muestran como "
-                            "referencia histórica y no representan "
-                            "condiciones actuales."
-                        )
-                    elif dias_desde_ultimo < 0:
-                        st.warning(
-                            "La fecha del último registro es posterior "
-                            "a la fecha actual. Conviene revisar la fuente."
-                        )
-
-                    if datos_referencia:
-                        st.warning(
-                            f"No hay registros históricos de "
-                            f"{estacion_principal['nombre']}. "
-                            f"Se muestran datos de referencia de "
-                            f"{estacion_datos['nombre']}, a "
-                            f"{estacion_datos['distancia_km']} km. "
-                            "No representan mediciones directas de la viña."
-                        )
-                    else:
-                        st.success(
-                            "Historial meteorológico de la estación principal."
-                        )
-
-                    st.caption(
-                        f"Fuente: {df_meteo.iloc[0]['fuente_datos']} · "
-                        f"Período: "
-                        f"{df_meteo['fecha'].min().date()} al "
-                        f"{df_meteo['fecha'].max().date()} · "
-                        f"{len(df_meteo)} registros"
-                    )
-
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        fig_temp = px.line(
-                            df_meteo,
-                            x="fecha",
-                            y=["temperatura_min", "temperatura_max"],
-                            title="Temperaturas mínimas y máximas (°C)",
-                            labels={
-                                "fecha": "Fecha",
-                                "value": "Temperatura (°C)",
-                                "variable": "Medición"
-                            }
-                        )
-                        st.plotly_chart(
-                            fig_temp,
-                            width="stretch"
-                        )
-
-                    with col2:
-                        fig_hum = px.line(
-                            df_meteo,
-                            x="fecha",
-                            y="humedad_relativa",
-                            title="Humedad relativa (%)",
-                            labels={
-                                "fecha": "Fecha",
-                                "humedad_relativa": "Humedad (%)"
-                            }
-                        )
-                        st.plotly_chart(
-                            fig_hum,
-                            width="stretch"
-                        )
-
-                    col3, col4 = st.columns(2)
-
-                    with col3:
-                        fig_prec = px.bar(
-                            df_meteo,
-                            x="fecha",
-                            y="precipitacion",
-                            title="Precipitaciones (mm)",
-                            labels={
-                                "fecha": "Fecha",
-                                "precipitacion": "Precipitación (mm)"
-                            }
-                        )
-                        st.plotly_chart(
-                            fig_prec,
-                            width="stretch"
-                        )
-
-                    with col4:
-                        fig_viento = px.line(
-                            df_meteo,
-                            x="fecha",
-                            y="velocidad_viento",
-                            title="Velocidad del viento (km/h)",
-                            labels={
-                                "fecha": "Fecha",
-                                "velocidad_viento": "Velocidad (km/h)"
-                            }
-                        )
-                        st.plotly_chart(
-                            fig_viento,
-                            width="stretch"
-                        )
-
-                    fig_rad = px.line(
-                        df_meteo,
-                        x="fecha",
-                        y="radiacion_solar",
-                        title="Radiación solar (MJ/m²)",
-                        labels={
-                            "fecha": "Fecha",
-                            "radiacion_solar": "Radiación (MJ/m²)"
-                        }
-                    )
-                    st.plotly_chart(
-                        fig_rad,
-                        width="stretch"
-                    )
-
-                else:
-                    st.info(
-                        "No hay una estación cercana que cumpla los "
-                        "criterios mínimos para análisis meteorológico."
-                    )
-
-                    if estacion_principal:
-                        st.write(
-                            f"**Estación geográficamente más cercana:** "
-                            f"{estacion_principal['nombre']} · "
-                            f"{estacion_principal['distancia_km']} km"
-                        )
-
-                    for item in seleccion_meteo["diagnostico_estaciones"]:
-                        st.caption(
-                            f"{item['estacion']['nombre']}: "
-                            f"{item['estado']} — {item['motivo']}"
-                        )
-
-            else:
-                st.info(
-                    "No se encontraron estaciones cercanas con "
-                    "historial meteorológico general disponible."
-                )
-
-        except Exception as e:
-            st.error(
-                f"No se pudo cargar el panel meteorológico: {e}"
-            )
-
-    else:
-        st.info(
-            "Registra la ubicación de tu viña para consultar "
-            "la información meteorológica."
-        )
-
-# =========================================================
-
-# =========================================================
-# PRECIPITACIÓN DMC
-# =========================================================
-
-if seccion_actual == "Meteorología y precipitaciones":
-
-    st.divider()
-    st.header("Precipitación - Dirección Meteorológica de Chile")
-
-    if latitud_guardada is not None and longitud_guardada is not None:
-
-        try:
-            estaciones_dmc = consultar_estaciones_cercanas(
-                VINA_ID_ACTUAL
-            )
-
-            estacion_dmc = None
-            acumulados_dmc = []
-
-            # Buscar la estación DMC más cercana con informes guardados.
-            for estacion in estaciones_dmc:
-
-                if estacion["fuente_datos"] != "DMC":
-                    continue
-
-                registros = consultar_mediciones_dmc_precipitacion(
-                    estacion["estacion_id"],
-                    tipo_registro="acumulado"
-                )
-
-                if registros:
-                    fecha_mas_reciente = max(
-                        registro["fecha_informe"]
-                        for registro in registros
-                    )
-
-                    acumulados_dmc = [
-                        registro
-                        for registro in registros
-                        if registro["fecha_informe"] == fecha_mas_reciente
-                    ]
-
-                    estacion_dmc = estacion
-                    break
-
-            if estacion_dmc is None:
-
-                st.info(
-                    "Todavía no hay informes de precipitación DMC "
-                    "guardados para las estaciones disponibles."
-                )
-
-            else:
-
-                fecha_informe = max(
-                    registro["fecha_informe"]
-                    for registro in acumulados_dmc
-                )
-
-                st.write(
-                    f"**Estación de referencia:** "
-                    f"{estacion_dmc['nombre']}"
-                )
-
-                st.caption(
-                    f"Fuente: DMC · "
-                    f"Distancia a la viña: "
-                    f"{estacion_dmc['distancia_km']} km · "
-                    f"Fecha del informe: {fecha_informe}"
-                )
-
-                if estacion_dmc["distancia_km"] > 30:
-                    st.warning(
-                        "Referencia meteorológica regional. "
-                        f"Esta estación está a "
-                        f"{estacion_dmc['distancia_km']:.2f} km "
-                        "de la viña, fuera del radio de referencia "
-                        "local de 30 km. Sus precipitaciones "
-                        "corresponden a la estación y no deben "
-                        "interpretarse como mediciones de la viña."
-                    )
-
-                dias_antiguedad = (
-                    pd.Timestamp.now().date()
-                    - pd.to_datetime(fecha_informe).date()
-                ).days
-
-                if dias_antiguedad > 7:
-                    st.warning(
-                        f"El informe tiene {dias_antiguedad} días "
-                        "de antigüedad. Estos datos son históricos "
-                        "y no representan la precipitación actual."
-                    )
-
-                else:
-                    st.info(
-                        "Informe reciente disponible. "
-                        "Los valores corresponden al período "
-                        "informado por la DMC."
-                    )
-
-                # Mostrar acumulados informados por la DMC.
-                acumulados_por_periodo = {
-                    registro["periodo"]: registro
-                    for registro in acumulados_dmc
-                }
-
-                col1, col2, col3 = st.columns(3)
-
-                for columna, periodo, etiqueta in [
-                    (col1, "Hoy", "Acumulado Hoy"),
-                    (col2, "Ayer", "Acumulado Ayer"),
-                    (col3, "Hoy + Ayer", "Total Hoy + Ayer")
-                ]:
-
-                    registro = acumulados_por_periodo.get(periodo)
-
-                    if registro is None:
-                        valor = "No disponible"
-
-                    elif (
-                        registro["estado"] == "numerico"
-                        and registro["precipitacion_mm"] is not None
-                    ):
-                        valor = (
-                            f"{registro['precipitacion_mm']:.1f} mm"
-                        )
-
-                    elif registro["estado"] == "s/p":
-                        valor = "s/p"
-
-                    else:
-                        valor = "No disponible"
-
-                    columna.metric(etiqueta, valor)
-
-                # Consultar el detalle horario del mismo informe.
-                horarios_dmc = consultar_mediciones_dmc_precipitacion(
-                    estacion_dmc["estacion_id"],
-                    fecha_inicio=fecha_informe,
-                    fecha_fin=fecha_informe,
-                    tipo_registro="horario"
-                )
-
-                if horarios_dmc:
-
-                    filas_horarias = []
-
-                    for registro in horarios_dmc:
-
-                        if (
-                            registro["estado"] == "numerico"
-                            and registro["precipitacion_mm"] is not None
-                        ):
-                            valor = (
-                                f"{registro['precipitacion_mm']:.1f} mm"
-                            )
-                        elif registro["estado"] == "s/p":
-                            valor = "s/p"
-                        else:
-                            valor = "No disponible"
-
-                        filas_horarias.append({
-                            "Período": registro["periodo"],
-                            "Inicio UTC": registro["inicio_utc"],
-                            "Término UTC": registro["termino_utc"],
-                            "Precipitación": valor,
-                            "Estado": registro["estado"],
-                            "Observaciones": registro["observaciones"]
-                        })
-
-                    df_dmc = pd.DataFrame(filas_horarias)
-
-                    with st.expander(
-                        "Ver detalle horario de precipitación",
-                        expanded=False
-                    ):
-                        st.dataframe(
-                            df_dmc,
-                            hide_index=True,
-                            width="stretch"
-                        )
-
-                        st.caption(
-                            "Los intervalos horarios están expresados en UTC. "
-                            "s/p indica que el informe señala ausencia de "
-                            "precipitación; no disponible indica que no "
-                            "se pudo obtener un valor numérico."
-                        )
-
-                else:
-                    st.info(
-                        "Este informe no tiene registros horarios "
-                        "disponibles."
-                    )
-
-        except Exception as e:
-            st.warning(
-                f"No se pudo cargar la información de precipitación DMC: {e}"
-            )
-
-    else:
-        st.info(
-            "Registra la ubicación de tu viña para consultar "
-            "informes DMC de estaciones cercanas."
-        )
-
-
-# =========================================================
-# PRECIPITACIÓN ACUMULADA DMC - RE1034
-# =========================================================
-
-if seccion_actual == "Meteorología y precipitaciones":
-
-    st.divider()
-    st.subheader("Precipitación acumulada - DMC (RE1034)")
+    st.title("Meteorología")
 
     st.caption(
-        "Informe de precipitaciones acumuladas en ventanas móviles "
-        "de 24 a 144 horas y total anual. Estos valores no representan "
-        "precipitaciones diarias independientes."
+        "Información meteorológica para las coordenadas "
+        "registradas de tu viña."
     )
 
-    if latitud_guardada is not None and longitud_guardada is not None:
+    from meteorologia_local import (
+        mostrar_meteorologia_local,
+        mostrar_condiciones_actuales,
+        mostrar_pronostico_local
+    )
 
-        try:
-            estaciones_re1034 = consultar_estaciones_cercanas(
+    if latitud_guardada is None or longitud_guardada is None:
+
+        st.info(
+            "Registra la ubicación geográfica de tu viña "
+            "para consultar la información meteorológica."
+        )
+
+    else:
+
+        lat_meteo = float(latitud_guardada)
+        lon_meteo = float(longitud_guardada)
+
+        st.caption(
+            f"Ubicación: {lat_meteo:.5f}, {lon_meteo:.5f} "
+            "· Fuente: Open-Meteo"
+        )
+
+        tab_actual, tab_historial, tab_pronostico = st.tabs([
+            "Condiciones actuales",
+            "Historial meteorológico",
+            "Pronóstico meteorológico"
+        ])
+
+        with tab_actual:
+
+            mostrar_condiciones_actuales(
+                lat_meteo, lon_meteo
+            )
+
+        with tab_historial:
+
+            mostrar_meteorologia_local(
                 VINA_ID_ACTUAL
             )
 
-            estacion_re1034 = None
-            registros_re1034 = []
+        with tab_pronostico:
 
-            # Buscar la estación DMC más cercana con datos RE1034.
-            for estacion in estaciones_re1034:
-
-                if estacion["fuente_datos"] != "DMC":
-                    continue
-
-                registros = consultar_mediciones_dmc_re1034(
-                    estacion["estacion_id"]
-                )
-
-                if not registros:
-                    continue
-
-                fecha_mas_reciente = max(
-                    registro["fecha_informe"]
-                    for registro in registros
-                )
-
-                registros_recientes = [
-                    registro
-                    for registro in registros
-                    if registro["fecha_informe"] == fecha_mas_reciente
-                ]
-
-                estacion_re1034 = estacion
-                registros_re1034 = registros_recientes
-                break
-
-            if estacion_re1034 is None:
-
-                st.info(
-                    "Todavía no hay informes RE1034 disponibles "
-                    "para las estaciones DMC cercanas."
-                )
-
-            else:
-
-                fecha_informe_re1034 = max(
-                    registro["fecha_informe"]
-                    for registro in registros_re1034
-                )
-
-                st.write(
-                    f"**Estación de referencia:** "
-                    f"{estacion_re1034['nombre']}"
-                )
-
-                st.caption(
-                    f"Fuente: DMC · "
-                    f"Distancia a la viña: "
-                    f"{estacion_re1034['distancia_km']} km · "
-                    f"Fecha del informe: {fecha_informe_re1034}"
-                )
-
-                if estacion_re1034["distancia_km"] > 30:
-                    st.warning(
-                        "Referencia meteorológica regional. "
-                        f"Esta estación está a "
-                        f"{estacion_re1034['distancia_km']:.2f} km "
-                        "de la viña, fuera del radio de referencia "
-                        "local de 30 km. Sus precipitaciones "
-                        "corresponden a la estación y no deben "
-                        "interpretarse como mediciones de la viña."
-                    )
-
-                dias_antiguedad_re1034 = (
-                    pd.Timestamp.now().date()
-                    - pd.to_datetime(
-                        fecha_informe_re1034
-                    ).date()
-                ).days
-
-                if dias_antiguedad_re1034 > 7:
-                    st.warning(
-                        f"El informe RE1034 tiene "
-                        f"{dias_antiguedad_re1034} días "
-                        "de antigüedad. Estos datos son "
-                        "históricos y no representan "
-                        "la precipitación actual."
-                    )
-                elif dias_antiguedad_re1034 < 0:
-                    st.warning(
-                        "La fecha del informe RE1034 es "
-                        "posterior a la fecha actual. "
-                        "Conviene revisar la fuente."
-                    )
-
-                registros_por_periodo = {
-                    registro["periodo"]: registro
-                    for registro in registros_re1034
-                }
-
-                periodos_re1034 = [
-                    ("24Hrs", "Últimas 24 horas"),
-                    ("48Hrs", "Últimas 48 horas"),
-                    ("72Hrs", "Últimas 72 horas"),
-                    ("96Hrs", "Últimas 96 horas"),
-                    ("120Hrs", "Últimas 120 horas"),
-                    ("144Hrs", "Últimas 144 horas")
-                ]
-
-                def mostrar_valor_re1034(registro):
-
-                    if registro is None:
-                        return "No disponible"
-
-                    if (
-                        registro["estado"] == "numerico"
-                        and registro["precipitacion_mm"] is not None
-                    ):
-                        return (
-                            f"{registro['precipitacion_mm']:.1f} mm"
-                        )
-
-                    if registro["estado"] == "s/p":
-                        return "s/p"
-
-                    if registro["estado"] == "no_reconocido":
-                        return "No reconocido"
-
-                    return "No disponible"
-
-                # Mostrar los seis acumulados móviles en dos filas.
-                for inicio in (0, 3):
-
-                    grupo = periodos_re1034[inicio:inicio + 3]
-                    columnas = st.columns(3)
-
-                    for columna, (periodo, etiqueta) in zip(
-                        columnas,
-                        grupo
-                    ):
-
-                        registro = registros_por_periodo.get(periodo)
-
-                        columna.metric(
-                            etiqueta,
-                            mostrar_valor_re1034(registro)
-                        )
-
-                        if registro and registro["fecha_referencia"]:
-                            fecha_referencia = pd.to_datetime(
-                                registro["fecha_referencia"]
-                            ).strftime("%d-%m-%Y")
-
-                            columna.caption(
-                                f"Fecha de referencia: {fecha_referencia}"
-                            )
-
-                # Mostrar el total anual en una fila independiente.
-                registro_anual = registros_por_periodo.get(
-                    "total_anual"
-                )
-
-                st.divider()
-                st.markdown("**Precipitación total anual informada**")
-
-                columna_anual, _ = st.columns([1, 3])
-
-                columna_anual.metric(
-                    "Total anual",
-                    mostrar_valor_re1034(registro_anual)
-                )
-
-                st.caption(
-                    "s/p indica que la DMC no publicó una observación. "
-                    "No se interpreta como 0 mm. Las ventanas de 24, "
-                    "48, 72, 96, 120 y 144 horas son acumulados "
-                    "móviles y no deben sumarse entre sí."
-                )
-
-        except Exception as e:
-            st.warning(
-                f"No se pudo cargar el informe DMC RE1034: {e}"
+            mostrar_pronostico_local(
+                lat_meteo, lon_meteo
             )
 
-    else:
-        st.info(
-            "Registra la ubicación de tu viña para consultar "
-            "informes RE1034 de estaciones cercanas."
+        st.divider()
+
+        st.caption(
+            "Fuente meteorológica externa: Open-Meteo. "
+            "Los datos corresponden a estimaciones de "
+            "modelos meteorológicos y no a mediciones "
+            "directas realizadas dentro de la viña. "
+            "Las mediciones del dispositivo FenologIA "
+            "constituyen una fuente complementaria."
         )
 
 
-
-# =========================================================
 
 if seccion_actual == "Mapa y monitoreo de plantas":
 
@@ -2468,43 +2249,10 @@ if seccion_actual == "Mapa y monitoreo de plantas":
         if "fecha" in datos.columns else []
     )
 
-    # DM.5: distribución visual de Mapa y monitoreo
-    panel_cargas, panel_visualizacion = st.columns(
-        [0.7, 3.3],
-        gap="medium"
-    )
+    st.title("Monitoreo de plantas")
 
-    # DM.14: alineación exacta del panel de importaciones
-    st.markdown("""
-    <style>
-    div.st-key-dm5_zip_dispositivo,
-    div.st-key-dm5_xlsx_fenologia,
-    div.st-key-dm5_csv_plantas {
-        margin-left: 0 !important;
-        padding-left: 0 !important;
-    }
-
-    div.st-key-dm5_zip_dispositivo button,
-    div.st-key-dm5_xlsx_fenologia button,
-    div.st-key-dm5_csv_plantas button {
-        width: 100% !important;
-        justify-content: flex-start !important;
-        text-align: left !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-        margin-left: 0 !important;
-        border: none !important;
-        background: transparent !important;
-    }
-
-    div.st-key-dm5_zip_dispositivo button p,
-    div.st-key-dm5_xlsx_fenologia button p,
-    div.st-key-dm5_csv_plantas button p {
-        text-align: left !important;
-        margin-left: 0 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    panel_cargas = st.container()
+    panel_visualizacion = st.container()
 
 # DM.24: ventana modal CSV con selección y vista previa
 @st.dialog("🍇 Cargar CSV plantas", width="large")
@@ -2895,12 +2643,7 @@ def ventana_zip_dispositivo(identidad_apertura):
             f"{len(contenido) / (1024 ** 2):.2f} MB"
         )
 
-        if st.button(
-            "Inspeccionar archivo ZIP",
-            key="dm26_inspeccionar_zip",
-            type="primary",
-            use_container_width=True
-        ):
+        if st.session_state.get(clave_checksum) != checksum_actual:
 
             limpiar_inspeccion()
 
@@ -5136,8 +4879,8 @@ def ventana_xlsx_fenologia():
     st.markdown("""
     <style>
     .st-key-dm49_guardar_mediciones button:not(:disabled) {
-        background-color: #793DB5 !important;
-        border-color: #793DB5 !important;
+        background-color: #322345 !important;
+        border-color: #322345 !important;
         color: #FFFFFF !important;
     }
 
@@ -5146,8 +4889,8 @@ def ventana_xlsx_fenologia():
     }
 
     .st-key-dm49_guardar_mediciones button:not(:disabled):hover {
-        background-color: #65309B !important;
-        border-color: #65309B !important;
+        background-color: #49365E !important;
+        border-color: #49365E !important;
     }
 
     .st-key-dm49_guardar_mediciones button:disabled {
@@ -5574,56 +5317,77 @@ if resultado_xlsx_guardado is not None:
 
 if seccion_actual == "Mapa y monitoreo de plantas":
     with panel_cargas:
-        st.markdown("### Importar datos")
 
-        if st.button(
-            "📦 Cargar ZIP dispositivo",
-            key="dm5_zip_dispositivo",
-            use_container_width=True
-        ):
-            limpiar_estados_zip_dispositivo()
+        acceso_carga = st.session_state.pop(
+            "fenologia_acceso_carga", None
+        )
 
-            identidad_apertura_zip = (
-                obtener_identidad_sesion_zip(
-                    st.session_state.get("usuario")
-                )
-            )
+        es_admin = usuario_actual["rol"] == "administrador"
 
-            st.session_state["dm26_identidad_zip"] = (
-                identidad_apertura_zip
-            )
+        columnas_carga = st.columns(
+            3 if es_admin else 2,
+            gap="small"
+        )
 
-            ventana_zip_dispositivo(
-                identidad_apertura_zip
-            )
-
-        if st.button(
-            "📊 Cargar xlsx fenologia",
-            key="dm5_xlsx_fenologia",
-            use_container_width=True
-        ):
-            ventana_xlsx_fenologia()
-
-        if usuario_actual["rol"] == "administrador":
+        with columnas_carga[0]:
 
             if st.button(
-                "🍇 Cargar CSV plantas",
-                key="dm5_csv_plantas",
+                "Cargar xlsx fenologia",
+                key="dm5_xlsx_fenologia",
+                type="primary",
                 use_container_width=True
-            ):
-                ventana_csv_plantas()
+            ) or acceso_carga == "xlsx":
+                ventana_xlsx_fenologia()
+
+        with columnas_carga[1]:
+
+            if st.button(
+                "Importar ZIP",
+                key="dm5_zip_dispositivo",
+                type="primary",
+                use_container_width=True
+            ) or acceso_carga == "zip":
+                limpiar_estados_zip_dispositivo()
+
+                identidad_apertura_zip = (
+                    obtener_identidad_sesion_zip(
+                        st.session_state.get("usuario")
+                    )
+                )
+
+                st.session_state["dm26_identidad_zip"] = (
+                    identidad_apertura_zip
+                )
+
+                ventana_zip_dispositivo(
+                    identidad_apertura_zip
+                )
+
+        if es_admin:
+
+            with columnas_carga[2]:
+
+                if st.button(
+                    "Registrar plantas",
+                    key="dm5_csv_plantas",
+                    use_container_width=True
+                ):
+                    ventana_csv_plantas()
 
         resultado_csv = st.session_state.pop(
             "csv_estructural_resultado", None
         )
 
         if resultado_csv and resultado_csv[0] == VINA_ID_ACTUAL:
+
             resultado = resultado_csv[1]
 
             st.success(
                 f"{resultado['plantas_creadas']} plantas registradas. "
                 f"{resultado['plantas_omitidas']} existentes conservadas."
             )
+
+    st.divider()
 
     # Contenedores asociados al panel derecho
     filtros_col = panel_visualizacion.container()
@@ -5634,84 +5398,99 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
     # ---- Filtros compactos del mapa
     with filtros_col:
-        st.subheader("Visualización de plantas")
 
-        modo_mediciones = st.radio(
-            "Modalidad de visualización",
-            ["Último registro por planta", "Fecha específica"],
-            horizontal=True,
-            key=f"modo_mediciones_{VINA_ID_ACTUAL}"
+        hay_mediciones = bool(fechas and params)
+
+        col_param, col_modo = st.columns(
+            2, gap="medium"
         )
+
+        with col_param:
+
+            if hay_mediciones:
+
+                param = st.selectbox(
+                    "Indicador",
+                    params,
+                    format_func=lambda k: info(k)["nombre"],
+                    key="selector_parametro_mapa"
+                )
+
+            else:
+
+                param = None
+                st.caption("Sin indicadores registrados.")
+
+        with col_modo:
+
+            modo_mediciones = st.selectbox(
+                "Mediciones",
+                [
+                    "Último registro por planta",
+                    "Fecha específica"
+                ],
+                key=f"modo_mediciones_{VINA_ID_ACTUAL}"
+            )
 
         modo_ultimo = (
             modo_mediciones == "Último registro por planta"
         )
 
-        if modo_ultimo:
-            st.caption(
-                "Cada planta muestra su última medición disponible. "
-                "Las fechas pueden ser diferentes entre plantas."
-            )
+        fecha = None
+        fecha2 = None
+        comparar = False
 
-        col_param, col_fecha, col_comparar = st.columns(
-            [1.5, 1.2, 1.3],
-            gap="medium"
+        col_cuartel, col_variedad = st.columns(
+            2, gap="medium"
         )
 
-        hay_mediciones = bool(fechas and params)
+        with col_cuartel:
 
-        with col_param:
-            if hay_mediciones:
-                param = st.selectbox(
-                    "Parámetro",
-                    params,
-                    format_func=lambda k: f"{info(k)['nombre']}  ·  {info(k)['archivo']}",
-                    key="selector_parametro_mapa"
-                )
-            else:
-                param = None
-                st.caption("Sin parámetros registrados")
+            sel_cuartel = st.multiselect(
+                "Cuartel",
+                sorted(estructura_mapa["cuartel"].unique()),
+                placeholder="Todos los cuarteles",
+                key=f"filtro_cuartel_{VINA_ID_ACTUAL}"
+            )
 
-        with col_fecha:
-            if modo_ultimo:
-                fecha = None
+        with col_variedad:
 
-                if fechas:
-                    ultima_fecha_registrada = max(
-                        pd.Timestamp(f).date()
-                        for f in fechas
-                    )
+            sel_variedad = st.multiselect(
+                "Variedad",
+                sorted(estructura_mapa["variedad"].unique()),
+                placeholder="Todas las variedades",
+                key=f"filtro_variedad_{VINA_ID_ACTUAL}"
+            )
 
-                    st.date_input(
-                        "Última medición individual",
-                        value=ultima_fecha_registrada,
-                        format="DD/MM/YYYY",
-                        disabled=True,
-                        key=(
-                            f"ultima_medicion_informativa_"
-                            f"{VINA_ID_ACTUAL}_"
-                            f"{ultima_fecha_registrada.isoformat()}"
-                        ),
-                        help=(
-                            "Fecha más reciente registrada en la viña. "
-                            "Cada planta conserva la fecha real "
-                            "de su última medición."
-                        )
-                    )
+        if modo_ultimo:
 
-                else:
-                    st.text_input(
-                        "Última medición individual",
-                        value="Sin mediciones registradas",
-                        disabled=True,
-                        key=f"sin_ultima_medicion_{VINA_ID_ACTUAL}"
-                    )
+            if fechas:
 
-            elif fechas:
-                fechas_calendario = {
-                    pd.Timestamp(f).date(): f
+                ultima_fecha_registrada = max(
+                    pd.Timestamp(f).date()
                     for f in fechas
-                }
+                )
+
+                st.caption(
+                    "Última medición registrada: "
+                    f"{ultima_fecha_registrada:%d/%m/%Y}. "
+                    "Cada planta muestra su registro más reciente."
+                )
+
+            else:
+
+                st.caption("Sin mediciones registradas.")
+
+        elif fechas:
+
+            fechas_calendario = {
+                pd.Timestamp(f).date(): f
+                for f in fechas
+            }
+
+            col_fecha, col_comparacion = st.columns(2)
+
+            with col_fecha:
 
                 fecha_elegida = st.date_input(
                     "Fecha de lectura",
@@ -5728,102 +5507,75 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                 )
 
                 if fecha_elegida not in fechas_calendario:
+
                     st.warning(
                         "No existen mediciones para esta fecha."
                     )
-            else:
-                fecha = None
-                st.caption("Sin mediciones registradas")
 
-        with col_comparar:
-            comparar = st.checkbox(
-                "Comparar con otra fecha",
-                disabled=(
-                    modo_ultimo
-                    or not hay_mediciones
-                    or len(fechas) < 2
-                )
-            )
+            with col_comparacion:
 
-            comparar = (
-                comparar and not modo_ultimo
-                and hay_mediciones and len(fechas) >= 2
-            )
+                if hay_mediciones and len(fechas_calendario) >= 2:
 
-            fecha2 = None
-
-            if comparar:
-
-                fechas_alternativas = [
-                    f for f in fechas_calendario
-                    if f != fecha_elegida
-                ]
-
-                fechas_previas = [
-                    f for f in fechas_alternativas
-                    if f < fecha_elegida
-                ]
-
-                fecha_comparacion_default = (
-                    max(fechas_previas)
-                    if fechas_previas
-                    else min(fechas_alternativas)
-                )
-
-                fecha_comparacion = st.date_input(
-                    "Fecha de comparación",
-                    value=fecha_comparacion_default,
-                    min_value=min(fechas_calendario),
-                    max_value=max(fechas_calendario),
-                    format="DD/MM/YYYY",
-                    key=f"calendario_comparacion_{VINA_ID_ACTUAL}"
-                )
-
-                if fecha_comparacion == fecha_elegida:
-
-                    st.warning(
-                        "Selecciona una fecha diferente "
-                        "a la fecha de lectura."
+                    comparar = st.checkbox(
+                        "Comparar con otra fecha",
+                        key=f"comparar_mapa_{VINA_ID_ACTUAL}"
                     )
 
-                    comparar = False
+                    if comparar:
 
-                elif (
-                    fecha_comparacion
-                    not in fechas_calendario
-                    or fecha_elegida
-                    not in fechas_calendario
-                ):
+                        fechas_alternativas = [
+                            f for f in fechas_calendario
+                            if f != fecha_elegida
+                        ]
 
-                    st.warning(
-                        "Ambas fechas deben tener mediciones "
-                        "para realizar la comparación."
-                    )
+                        fechas_previas = [
+                            f for f in fechas_alternativas
+                            if f < fecha_elegida
+                        ]
 
-                    comparar = False
+                        fecha_comparacion_default = (
+                            max(fechas_previas)
+                            if fechas_previas
+                            else min(fechas_alternativas)
+                        )
 
-                else:
+                        fecha_comparacion = st.date_input(
+                            "Fecha de comparación",
+                            value=fecha_comparacion_default,
+                            min_value=min(fechas_calendario),
+                            max_value=max(fechas_calendario),
+                            format="DD/MM/YYYY",
+                            key=f"calendario_comparacion_{VINA_ID_ACTUAL}"
+                        )
 
-                    fecha2 = fechas_calendario[
-                        fecha_comparacion
-                    ]
+                        if fecha_comparacion == fecha_elegida:
 
-        col_cuartel, col_variedad = st.columns(
-            2,
-            gap="medium"
-        )
+                            st.warning(
+                                "Selecciona una fecha diferente."
+                            )
 
-        with col_cuartel:
-            sel_cuartel = st.multiselect(
-                "Cuartel",
-                sorted(estructura_mapa["cuartel"].unique())
-            )
+                            comparar = False
 
-        with col_variedad:
-            sel_variedad = st.multiselect(
-                "Variedad",
-                sorted(estructura_mapa["variedad"].unique())
-            )
+                        elif (
+                            fecha_comparacion not in fechas_calendario
+                            or fecha_elegida not in fechas_calendario
+                        ):
+
+                            st.warning(
+                                "Ambas fechas deben tener mediciones."
+                            )
+
+                            comparar = False
+
+                        else:
+
+                            fecha2 = fechas_calendario[
+                                fecha_comparacion
+                            ]
+
+        else:
+
+            st.caption("Sin mediciones registradas.")
 
     # ---- Todas las plantas registradas
     if modo_ultimo:
@@ -6374,9 +6126,30 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
             ant = anterior.loc[pid] if comparar else None
 
-            tab_mediciones, tab_evolucion, tab_fotografias = st.tabs(
-                ["📊 Mediciones", "📈 Evolución", "📸 Fotografías e IA"]
+            plantas_claro_ficha = consultar_claro_monitoreado(
+                VINA_ID_ACTUAL,
+                s["cuartel"]
+            ) or []
+
+            pertenece_al_claro = any(
+                str(planta[1]) == str(plant_internal_id)
+                for planta in plantas_claro_ficha
             )
+
+            etiquetas_ficha = [
+                "Mediciones",
+                "Evolución",
+                "Fotografías e IA"
+            ]
+
+            if pertenece_al_claro:
+                etiquetas_ficha.append("Registro dispositivo")
+
+            pestanas_ficha = st.tabs(etiquetas_ficha)
+
+            tab_mediciones = pestanas_ficha[0]
+            tab_evolucion = pestanas_ficha[1]
+            tab_fotografias = pestanas_ficha[2]
 
             with tab_mediciones:
 
@@ -6448,6 +6221,203 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                     g.update_layout(height=260, margin=dict(l=0, r=0, t=40, b=0), legend_title=None, xaxis_title=None,
                                     yaxis_title=P["unidad"] or None, legend=dict(orientation="h", y=-0.25))
                     st.plotly_chart(g, width="stretch")
+
+
+            if pertenece_al_claro:
+                with pestanas_ficha[3]:
+                    from database import (
+                        consultar_capturas_ambientales,
+                        consultar_ambiente_fotografia
+                    )
+
+                    st.markdown("### Historial ambiental del dispositivo")
+
+                    st.caption(
+                        "Mediciones locales registradas al momento "
+                        "de la captura. Independientes de las "
+                        "estimaciones meteorológicas de Open-Meteo."
+                    )
+
+                    try:
+
+                        capturas_ambientales = consultar_capturas_ambientales(
+                            plant_internal_id,
+                            VINA_ID_ACTUAL,
+                            usuario_actual["usuario_id"]
+                        )
+
+                    except PermissionError:
+
+                        capturas_ambientales = []
+                        st.error("No tienes autorización para consultar estos datos.")
+
+                    else:
+
+                        if not capturas_ambientales:
+
+                            st.info(
+                                "Esta planta todavía no tiene capturas "
+                                "ambientales del dispositivo."
+                            )
+
+                        else:
+
+                            ultima = capturas_ambientales[0]
+
+                            temperatura = ultima["temperatura_ambiental"]
+                            humedad = ultima["humedad_ambiental"]
+
+                            col_temp, col_hum = st.columns(2)
+
+                            col_temp.metric(
+                                "Temperatura ambiental",
+                                f"{temperatura:.1f} °C".replace(".", ",")
+                                if temperatura is not None else "Sin datos"
+                            )
+
+                            col_hum.metric(
+                                "Humedad relativa",
+                                f"{humedad:.1f} %".replace(".", ",")
+                                if humedad is not None else "Sin datos"
+                            )
+
+                            st.caption(
+                                f"Última captura: {ultima['fecha_hora']} · "
+                                f"Dispositivo: {ultima['device_id']}"
+                            )
+
+                            tabla_ambiental = pd.DataFrame(
+                                capturas_ambientales
+                            )
+
+                            tabla_ambiental = tabla_ambiental.rename(columns={
+                                "fecha_hora": "Fecha y hora",
+                                "temperatura_ambiental": "Temperatura (°C)",
+                                "humedad_ambiental": "Humedad relativa (%)",
+                                "device_id": "Dispositivo",
+                                "tiene_fotografia": "Fotografía"
+                            })
+
+                            tabla_ambiental["Fotografía"] = (
+                                tabla_ambiental["Fotografía"].map({
+                                    1: "Sí",
+                                    0: "No"
+                                })
+                            )
+
+                            with st.expander(
+                                "Ver historial de capturas ambientales"
+                            ):
+
+                                st.caption(
+                                    "Selecciona una fila para consultar su fotografía."
+                                )
+
+                                seleccion_ambiental = st.dataframe(
+                                    tabla_ambiental[[
+                                        "Fecha y hora",
+                                        "Temperatura (°C)",
+                                        "Humedad relativa (%)",
+                                        "Dispositivo",
+                                        "Fotografía"
+                                    ]],
+                                    hide_index=True,
+                                    use_container_width=True,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                    key=f"historial_ambiental_{VINA_ID_ACTUAL}_{plant_internal_id}"
+                                )
+
+                                @st.dialog("Fotografía de la captura", width="large")
+                                def mostrar_fotografia_captura(captura):
+
+                                    from contextlib import closing
+                                    from database import verificar_permiso_mediciones
+
+                                    try:
+                                        with closing(conectar()) as conexion:
+
+                                            conexion.execute("PRAGMA query_only = ON")
+
+                                            verificar_permiso_mediciones(
+                                                conexion,
+                                                usuario_actual["usuario_id"],
+                                                VINA_ID_ACTUAL
+                                            )
+
+                                            fotos = conexion.execute("""
+                                                SELECT ruta_archivo
+                                                FROM vista_imagenes_origen
+                                                WHERE captura_id = ?
+                                                  AND plant_id = ?
+                                                  AND vina_id = ?
+                                                  AND origen = 'CAPTURA_DISPOSITIVO'
+                                            """, (
+                                                captura["captura_id"],
+                                                plant_internal_id,
+                                                VINA_ID_ACTUAL
+                                            )).fetchall()
+
+                                    except PermissionError:
+                                        st.error("Consulta no autorizada.")
+                                        return
+
+                                    st.caption(
+                                        f"Fecha: {captura['fecha_hora']} · "
+                                        f"Dispositivo: {captura['device_id']}"
+                                    )
+
+                                    if not fotos:
+                                        st.warning("No se encontró la fotografía registrada.")
+
+                                    for foto in fotos:
+
+                                        ruta_foto = obtener_ruta_fotografia_segura(foto[0])
+
+                                        if ruta_foto is not None:
+                                            st.image(str(ruta_foto), width="stretch")
+                                        else:
+                                            st.warning("Fotografía no disponible.")
+
+                                    if st.button(
+                                        "Cerrar fotografía",
+                                        key="cerrar_foto_historial"
+                                    ):
+                                        st.rerun()
+
+                                filas_seleccionadas = seleccion_ambiental.selection.rows
+
+                                clave_seleccion = (
+                                    f"ultima_foto_ambiental_{VINA_ID_ACTUAL}_{plant_internal_id}"
+                                )
+
+                                if filas_seleccionadas:
+
+                                    posicion = filas_seleccionadas[0]
+
+                                    if 0 <= posicion < len(capturas_ambientales):
+
+                                        captura_elegida = capturas_ambientales[posicion]
+
+                                        if captura_elegida["tiene_fotografia"] == 1:
+
+                                            if st.session_state.get(clave_seleccion) != (
+                                                captura_elegida["captura_id"]
+                                            ):
+
+                                                st.session_state[clave_seleccion] = (
+                                                    captura_elegida["captura_id"]
+                                                )
+
+                                                mostrar_fotografia_captura(captura_elegida)
+
+                                        else:
+                                            st.session_state.pop(clave_seleccion, None)
+                                            st.caption("Esta captura no tiene fotografía.")
+
+                                else:
+                                    st.session_state.pop(clave_seleccion, None)
+
 
 
             with tab_fotografias:
@@ -6550,201 +6520,7 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                                         )
 
 
-                from database import (
-                    consultar_capturas_ambientales,
-                    consultar_ambiente_fotografia
-                )
-
-                st.divider()
-                st.markdown("### 🌡️ Historial ambiental del dispositivo")
-
-                st.caption(
-                    "Mediciones locales registradas al momento "
-                    "de la captura. Independientes de las "
-                    "estaciones meteorológicas externas."
-                )
-
-                try:
-
-                    capturas_ambientales = consultar_capturas_ambientales(
-                        plant_internal_id,
-                        VINA_ID_ACTUAL,
-                        usuario_actual["usuario_id"]
-                    )
-
-                except PermissionError:
-
-                    capturas_ambientales = []
-                    st.error("No tienes autorización para consultar estos datos.")
-
-                else:
-
-                    if not capturas_ambientales:
-
-                        st.info(
-                            "Esta planta todavía no tiene capturas "
-                            "ambientales del dispositivo."
-                        )
-
-                    else:
-
-                        ultima = capturas_ambientales[0]
-
-                        temperatura = ultima["temperatura_ambiental"]
-                        humedad = ultima["humedad_ambiental"]
-
-                        col_temp, col_hum = st.columns(2)
-
-                        col_temp.metric(
-                            "Temperatura ambiental",
-                            f"{temperatura:.1f} °C".replace(".", ",")
-                            if temperatura is not None else "Sin datos"
-                        )
-
-                        col_hum.metric(
-                            "Humedad relativa",
-                            f"{humedad:.1f} %".replace(".", ",")
-                            if humedad is not None else "Sin datos"
-                        )
-
-                        st.caption(
-                            f"Última captura: {ultima['fecha_hora']} · "
-                            f"Dispositivo: {ultima['device_id']}"
-                        )
-
-                        tabla_ambiental = pd.DataFrame(
-                            capturas_ambientales
-                        )
-
-                        tabla_ambiental = tabla_ambiental.rename(columns={
-                            "fecha_hora": "Fecha y hora",
-                            "temperatura_ambiental": "Temperatura (°C)",
-                            "humedad_ambiental": "Humedad relativa (%)",
-                            "device_id": "Dispositivo",
-                            "tiene_fotografia": "Fotografía"
-                        })
-
-                        tabla_ambiental["Fotografía"] = (
-                            tabla_ambiental["Fotografía"].map({
-                                1: "Sí",
-                                0: "No"
-                            })
-                        )
-
-                        with st.expander(
-                            "Ver historial de capturas ambientales"
-                        ):
-
-                            st.caption(
-                                "Selecciona una fila para consultar su fotografía."
-                            )
-
-                            seleccion_ambiental = st.dataframe(
-                                tabla_ambiental[[
-                                    "Fecha y hora",
-                                    "Temperatura (°C)",
-                                    "Humedad relativa (%)",
-                                    "Dispositivo",
-                                    "Fotografía"
-                                ]],
-                                hide_index=True,
-                                use_container_width=True,
-                                on_select="rerun",
-                                selection_mode="single-row",
-                                key=f"historial_ambiental_{VINA_ID_ACTUAL}_{plant_internal_id}"
-                            )
-
-                            @st.dialog("Fotografía de la captura", width="large")
-                            def mostrar_fotografia_captura(captura):
-
-                                from contextlib import closing
-                                from database import verificar_permiso_mediciones
-
-                                try:
-                                    with closing(conectar()) as conexion:
-
-                                        conexion.execute("PRAGMA query_only = ON")
-
-                                        verificar_permiso_mediciones(
-                                            conexion,
-                                            usuario_actual["usuario_id"],
-                                            VINA_ID_ACTUAL
-                                        )
-
-                                        fotos = conexion.execute("""
-                                            SELECT ruta_archivo
-                                            FROM vista_imagenes_origen
-                                            WHERE captura_id = ?
-                                              AND plant_id = ?
-                                              AND vina_id = ?
-                                              AND origen = 'CAPTURA_DISPOSITIVO'
-                                        """, (
-                                            captura["captura_id"],
-                                            plant_internal_id,
-                                            VINA_ID_ACTUAL
-                                        )).fetchall()
-
-                                except PermissionError:
-                                    st.error("Consulta no autorizada.")
-                                    return
-
-                                st.caption(
-                                    f"Fecha: {captura['fecha_hora']} · "
-                                    f"Dispositivo: {captura['device_id']}"
-                                )
-
-                                if not fotos:
-                                    st.warning("No se encontró la fotografía registrada.")
-
-                                for foto in fotos:
-
-                                    ruta_foto = obtener_ruta_fotografia_segura(foto[0])
-
-                                    if ruta_foto is not None:
-                                        st.image(str(ruta_foto), width="stretch")
-                                    else:
-                                        st.warning("Fotografía no disponible.")
-
-                                if st.button(
-                                    "Cerrar fotografía",
-                                    key="cerrar_foto_historial"
-                                ):
-                                    st.rerun()
-
-                            filas_seleccionadas = seleccion_ambiental.selection.rows
-
-                            clave_seleccion = (
-                                f"ultima_foto_ambiental_{VINA_ID_ACTUAL}_{plant_internal_id}"
-                            )
-
-                            if filas_seleccionadas:
-
-                                posicion = filas_seleccionadas[0]
-
-                                if 0 <= posicion < len(capturas_ambientales):
-
-                                    captura_elegida = capturas_ambientales[posicion]
-
-                                    if captura_elegida["tiene_fotografia"] == 1:
-
-                                        if st.session_state.get(clave_seleccion) != (
-                                            captura_elegida["captura_id"]
-                                        ):
-
-                                            st.session_state[clave_seleccion] = (
-                                                captura_elegida["captura_id"]
-                                            )
-
-                                            mostrar_fotografia_captura(captura_elegida)
-
-                                    else:
-                                        st.session_state.pop(clave_seleccion, None)
-                                        st.caption("Esta captura no tiene fotografía.")
-
-                            else:
-                                st.session_state.pop(clave_seleccion, None)
-
-                st.divider()
+                from database import consultar_ambiente_fotografia
 
                 imagenes = consultar_imagenes_por_planta(
                     plant_internal_id,
@@ -6766,10 +6542,21 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
                         image_id, ruta_archivo, tipo, fecha_subida, measurement_id, fecha_hora, plant_id = imagen
 
-                        with st.expander(
-                            f"Fotografía · {fecha_hora}",
-                            expanded=False
+                        @st.dialog(
+                            "Fotografía de la planta",
+                            width="large",
+                            dismissible=True
+                        )
+                        def abrir_fotografia_monitoreo(
+                            image_id, ruta_archivo, fecha_hora
                         ):
+
+                            if st.button(
+                                "Cerrar ventana",
+                                key=f"cerrar_monitoreo_{image_id}"
+                            ):
+                                st.rerun()
+
                             st.write(f"Fecha de captura: {fecha_hora}")
 
                             from database import (
@@ -6825,39 +6612,9 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                             if ruta is not None:
                                 st.image(str(ruta), width=400)
 
-                                analizar = st.button(
-                                    "🧠 Analizar fotografía",
-                                    key=f"analizar_{image_id}"
+                                mostrar_editor_fenologia(
+                                    ruta, image_id, VINA_ID_ACTUAL, "monitoreo"
                                 )
-
-                                if analizar:
-                                    try:
-                                        with st.spinner("Analizando fotografía..."):
-
-                                            resultado = analizar_uvas_roboflow(str(ruta))
-
-                                            guardar_analisis_imagen(
-                                                image_id=image_id,
-                                                modelo=resultado["modelo"],
-                                                version_modelo=resultado["version_modelo"],
-                                                cantidad_racimos=None,
-                                                porcentaje_verde=None,
-                                                porcentaje_envero=None,
-                                                porcentaje_morado=None,
-                                                etapa_fenologica=None,
-                                                confianza=max(resultado["confianzas"], default=None),
-                                                resultado_json=json.dumps(
-                                                resultado,
-                                                ensure_ascii=False,
-                                                default=str
-                                            ),
-                                            vina_id=VINA_ID_ACTUAL
-                                            )
-
-                                        st.success("¡Análisis realizado y guardado correctamente!")
-
-                                    except Exception as e:
-                                        st.error(f"No se pudo analizar la fotografía: {e}")
 
                                 # HISTORIAL PERMANENTE DE ANÁLISIS
                                 st.divider()
@@ -6894,7 +6651,10 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                                         if resultado_json:
                                             datos_analisis = json.loads(resultado_json)
 
-                                            if modelo == "Roboflow":
+                                            if modelo == "FenologIA - SAM 2":
+                                                mostrar_resultados_fenologia(datos_analisis, f"historial_monitoreo_{image_id}_{analisis_id}")
+
+                                            elif modelo == "Roboflow":
                                                 st.metric(
                                                     "Detecciones de uvas",
                                                     datos_analisis.get("cantidad_detecciones", 0)
@@ -6974,13 +6734,23 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                                 st.warning(f"No se encontró el archivo: {ruta_archivo}")
 
 
+                        if st.button(
+                            f"Ver fotografía · {fecha_hora}",
+                            key=f"abrir_monitoreo_{image_id}",
+                            width="stretch"
+                        ):
+                            abrir_fotografia_monitoreo(
+                                image_id, ruta_archivo, fecha_hora
+                            )
+
+
 # =========================================================
 # RESUMEN Y DIAGNÓSTICO INTELIGENTE
 # =========================================================
 
 if seccion_actual == "Resumen y diagnóstico inteligente":
 
-    st.title("🍇 Resumen y diagnóstico inteligente")
+    st.title("Diagnóstico de mi viña")
 
     st.caption(
         f"Estado general de {NOMBRE_VINA}"
@@ -7041,96 +6811,183 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
         )
 
         st.caption(
-            f"Última fecha registrada: {fecha_ultima}"
+            f"Último registro: {fecha_ultima} · "
+            "Diagnóstico basado en la última medición de cada planta."
         )
 
-        st.info(
-            "Este diagnóstico utiliza la última medición "
-            "disponible de cada planta. Los registros pueden "
-            "corresponder a fechas diferentes."
-        )
+        alertas_detectadas = []
 
-        st.caption(
-            f"Período de las mediciones consideradas: "
-            f"{fecha_mas_antigua} a {fecha_ultima}."
-        )
+        for parametro, (operador, umbral) in ALERTAS.items():
 
-        distribucion_fechas = (
-            datos_actuales["fecha"]
-            .value_counts()
-            .sort_index(ascending=False)
-            .rename_axis("Fecha de medición")
-            .reset_index(name="Cantidad de plantas")
-        )
+            if parametro not in datos_actuales.columns:
+                continue
 
-        with st.expander("Antigüedad de las mediciones"):
-            st.dataframe(
-                distribucion_fechas,
-                hide_index=True,
-                use_container_width=True
+            valores = pd.to_numeric(
+                datos_actuales[parametro],
+                errors="coerce"
             )
 
-        # -----------------------------------------------------
-        # INDICADORES GENERALES
-        # -----------------------------------------------------
+            if operador == "<":
+                condicion = valores < umbral
+            elif operador == ">":
+                condicion = valores > umbral
+            else:
+                continue
 
-        st.subheader("Estado general de la viña")
+            plantas_alertadas = datos_actuales[
+                condicion.fillna(False)
+            ]
 
-        cobertura1, cobertura2, cobertura3 = st.columns(3)
+            for _, planta in plantas_alertadas.iterrows():
 
-        cobertura1.metric(
-            "Plantas registradas",
-            total_registradas
+                alertas_detectadas.append({
+                    "Código de planta": planta["id"],
+                    "Cuartel": planta.get("cuartel"),
+                    "Variedad": planta.get("variedad"),
+                    "Parámetro": info(parametro)["nombre"],
+                    "Valor registrado": valores.loc[
+                        planta.name
+                    ],
+                    "Umbral": f"{operador} {umbral}"
+                })
+
+        total_plantas_alertadas = (
+            len(
+                set(
+                    alerta["Código de planta"]
+                    for alerta in alertas_detectadas
+                )
+            )
         )
 
-        cobertura2.metric(
-            "Plantas sin historial",
-            total_sin_historial
-        )
+        st.subheader("Estado general")
 
-        cobertura3.metric(
-            "Cobertura de monitoreo",
-            f"{100 * total_plantas / total_registradas:.1f}%"
-            if total_registradas else "Sin datos"
-        )
-
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             with st.container(border=True):
                 st.metric(
-                    "Plantas medidas",
+                    "Plantas monitoreadas",
                     f"{total_plantas:,}".replace(",", ".")
                 )
 
         with col2:
             with st.container(border=True):
                 st.metric(
-                    "Cuarteles",
-                    total_cuarteles
+                    "Cobertura de monitoreo",
+                    f"{100 * total_plantas / total_registradas:.1f}%"
+                    if total_registradas else "Sin datos"
                 )
 
         with col3:
             with st.container(border=True):
                 st.metric(
-                    "Variedades",
-                    total_variedades
-                )
-
-        with col4:
-            with st.container(border=True):
-                st.metric(
-                    "Registros históricos",
-                    f"{total_mediciones:,}".replace(",", ".")
+                    "Plantas con alertas",
+                    f"{total_plantas_alertadas:,}".replace(",", ".")
                 )
 
         st.divider()
 
+        st.subheader("Alertas por cuartel")
+
+        if alertas_detectadas:
+
+            st.warning(
+                "Se detectaron valores fuera de los umbrales "
+                "de atención configurados."
+            )
+
+            tabla_alertas = pd.DataFrame(
+                alertas_detectadas
+            )
+
+            # -------------------------------------------------
+            # RESUMEN POR CUARTEL
+            # -------------------------------------------------
+
+
+
+            resumen_cuarteles = (
+                datos_actuales.groupby("cuartel")["id"]
+                .nunique()
+                .reset_index(name="Plantas medidas")
+                .rename(columns={"cuartel": "Cuartel"})
+            )
+
+            plantas_alertadas_cuartel = (
+                tabla_alertas.groupby("Cuartel")[
+                    "Código de planta"
+                ]
+                .nunique()
+                .reset_index(name="Plantas con alertas")
+            )
+
+            resumen_cuarteles = resumen_cuarteles.merge(
+                plantas_alertadas_cuartel,
+                on="Cuartel",
+                how="left"
+            )
+
+            resumen_cuarteles["Plantas con alertas"] = (
+                resumen_cuarteles["Plantas con alertas"]
+                .fillna(0)
+                .astype(int)
+            )
+
+            resumen_cuarteles["% con alertas"] = (
+                resumen_cuarteles["Plantas con alertas"]
+                / resumen_cuarteles["Plantas medidas"]
+                * 100
+            ).round(1)
+
+            st.dataframe(
+                resumen_cuarteles.sort_values(
+                    "% con alertas",
+                    ascending=False
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "% con alertas": st.column_config.ProgressColumn(
+                        "% con alertas",
+                        help="Porcentaje de plantas con al menos una alerta en el cuartel.",
+                        format="%.1f %%",
+                        min_value=0,
+                        max_value=100
+                    )
+                }
+            )
+
+            # -------------------------------------------------
+            # DETALLE DE PLANTAS ALERTADAS
+            # -------------------------------------------------
+
+            with st.expander(
+                "Consultar detalle de plantas alertadas"
+            ):
+
+                st.dataframe(
+                    tabla_alertas,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        else:
+
+            st.success(
+                "No se detectaron valores fuera de los umbrales "
+                "configurados en la última medición."
+            )
+
+
         # -----------------------------------------------------
-        # PARÁMETROS DISPONIBLES
+        # RESUMEN METEOROLÓGICO
         # -----------------------------------------------------
 
-        st.subheader("Indicadores de los últimos registros")
+
+        st.divider()
+
+        st.subheader("Indicadores vitícolas")
 
         columnas_base = {
             "id",
@@ -7199,9 +7056,8 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
             )
 
         st.caption(
-            "Los valores corresponden al promedio de las plantas "
-            "considerando el último registro disponible "
-            "de cada planta, aunque las fechas sean diferentes."
+            "Promedios de las últimas mediciones disponibles "
+            "de cada planta."
         )
 
         st.divider()
@@ -7210,346 +7066,181 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
         # ALERTAS SEGÚN UMBRALES CONFIGURADOS
         # -----------------------------------------------------
 
-        st.subheader("Alertas de plantas")
+        with st.expander("Contexto meteorológico"):
 
-        alertas_detectadas = []
-
-        for parametro, (operador, umbral) in ALERTAS.items():
-
-            if parametro not in datos_actuales.columns:
-                continue
-
-            valores = pd.to_numeric(
-                datos_actuales[parametro],
-                errors="coerce"
+            st.caption(
+                "Información modelada por coordenadas "
+                "de la viña · Fuente: Open-Meteo."
             )
 
-            if operador == "<":
-                condicion = valores < umbral
-            elif operador == ">":
-                condicion = valores > umbral
+            if latitud_guardada is None or longitud_guardada is None:
+
+                st.info(
+                    "Registra la ubicación de tu viña "
+                    "para incorporar información meteorológica."
+                )
+
             else:
-                continue
 
-            plantas_alertadas = datos_actuales[
-                condicion.fillna(False)
-            ]
-
-            for _, planta in plantas_alertadas.iterrows():
-
-                alertas_detectadas.append({
-                    "Código de planta": planta["id"],
-                    "Cuartel": planta.get("cuartel"),
-                    "Variedad": planta.get("variedad"),
-                    "Parámetro": info(parametro)["nombre"],
-                    "Valor registrado": valores.loc[
-                        planta.name
-                    ],
-                    "Umbral": f"{operador} {umbral}"
-                })
-
-        total_plantas_alertadas = (
-            len(
-                set(
-                    alerta["Código de planta"]
-                    for alerta in alertas_detectadas
-                )
-            )
-        )
-
-        with st.container(border=True):
-            st.metric(
-                "Plantas con al menos una alerta",
-                f"{total_plantas_alertadas:,}".replace(",", ".")
-            )
-
-        if alertas_detectadas:
-
-            st.warning(
-                "Se detectaron valores que superan los umbrales "
-                "de atención configurados."
-            )
-
-            tabla_alertas = pd.DataFrame(
-                alertas_detectadas
-            )
-
-            # -------------------------------------------------
-            # RESUMEN POR CUARTEL
-            # -------------------------------------------------
-
-            st.subheader("Distribución de alertas por cuartel")
-
-            resumen_cuarteles = (
-                datos_actuales.groupby("cuartel")["id"]
-                .nunique()
-                .reset_index(name="Plantas medidas")
-                .rename(columns={"cuartel": "Cuartel"})
-            )
-
-            plantas_alertadas_cuartel = (
-                tabla_alertas.groupby("Cuartel")[
-                    "Código de planta"
-                ]
-                .nunique()
-                .reset_index(name="Plantas con alertas")
-            )
-
-            resumen_cuarteles = resumen_cuarteles.merge(
-                plantas_alertadas_cuartel,
-                on="Cuartel",
-                how="left"
-            )
-
-            resumen_cuarteles["Plantas con alertas"] = (
-                resumen_cuarteles["Plantas con alertas"]
-                .fillna(0)
-                .astype(int)
-            )
-
-            resumen_cuarteles["% con alertas"] = (
-                resumen_cuarteles["Plantas con alertas"]
-                / resumen_cuarteles["Plantas medidas"]
-                * 100
-            ).round(1)
-
-            st.dataframe(
-                resumen_cuarteles,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "% con alertas": st.column_config.ProgressColumn(
-                        "% con alertas",
-                        help="Porcentaje de plantas con al menos una alerta en el cuartel.",
-                        format="%.1f %%",
-                        min_value=0,
-                        max_value=100
-                    )
-                }
-            )
-
-            # -------------------------------------------------
-            # DETALLE DE PLANTAS ALERTADAS
-            # -------------------------------------------------
-
-            with st.expander(
-                "Consultar detalle de plantas alertadas"
-            ):
-
-                st.dataframe(
-                    tabla_alertas,
-                    use_container_width=True,
-                    hide_index=True
+                from meteorologia_local import (
+                    obtener_pronostico_local,
+                    obtener_historial_local,
+                    formato_valor_meteo,
+                    descripcion_tiempo
                 )
 
-        else:
+                lat = float(latitud_guardada)
+                lon = float(longitud_guardada)
 
-            st.success(
-                "No se detectaron valores fuera de los umbrales "
-                "configurados en la última medición."
-            )
+                try:
 
+                    datos = obtener_pronostico_local(lat, lon)
+                    actual = datos["current"]
 
-        # -----------------------------------------------------
-        # RESUMEN METEOROLÓGICO
-        # -----------------------------------------------------
-
-        st.subheader("🌦️ Condiciones meteorológicas")
-
-        st.info(
-            "Las estaciones meteorológicas proporcionan datos "
-            "externos de referencia para contextualizar las "
-            "condiciones de la viña. El dispositivo de monitoreo "
-            "incorporará mediciones directas de temperatura y "
-            "humedad durante cada captura de datos. Ambas fuentes "
-            "son complementarias y deben interpretarse por separado."
-        )
-
-        if latitud_guardada is not None and longitud_guardada is not None:
-
-            try:
-                seleccion_resumen = seleccionar_estacion_con_historial(
-                    VINA_ID_ACTUAL
-                )
-
-                if seleccion_resumen and seleccion_resumen["registros"]:
-
-                    estacion_datos = seleccion_resumen["estacion"]
-                    datos_meteo_resumen = seleccion_resumen["registros"]
-                    datos_referencia = seleccion_resumen["es_referencia"]
-                    dias_desde_ultimo = seleccion_resumen[
-                        "dias_desde_ultimo"
-                    ]
-
-                    df_resumen_meteo = pd.DataFrame(
-                        datos_meteo_resumen
-                    )
-
-                    df_resumen_meteo["fecha"] = pd.to_datetime(
-                        df_resumen_meteo["fecha"]
-                    )
-
-                    df_resumen_meteo = (
-                        df_resumen_meteo.sort_values("fecha")
-                    )
-
-                    ultimo_registro = df_resumen_meteo.iloc[-1]
-
-                    estacion_cercana = seleccion_resumen["estacion_mas_cercana"]
-
-                    col_cercana, col_historial = st.columns(2)
-
-                    with col_cercana:
-                        with st.container(border=True):
-                            st.caption("ESTACIÓN MÁS CERCANA")
-                            st.write(
-                                f"**{estacion_cercana['nombre']}**"
-                            )
-                            st.caption(
-                                f"Distancia a la viña: "
-                                f"{estacion_cercana['distancia_km']} km"
-                            )
-
-                    with col_historial:
-                        with st.container(border=True):
-                            st.caption("ESTACIÓN PARA ANÁLISIS HISTÓRICO")
-                            st.write(
-                                f"**{estacion_datos['nombre']}**"
-                            )
-                            st.caption(
-                                f"Distancia a la viña: "
-                                f"{estacion_datos['distancia_km']} km"
-                            )
-
-                    if datos_referencia:
-                        st.warning(
-                            f"No hay registros de la estación más cercana. "
-                            f"Se utilizan datos de referencia de "
-                            f"{estacion_datos['nombre']}, ubicada a "
-                            f"{estacion_datos['distancia_km']} km. "
-                            "No representan mediciones directas de la viña."
-                        )
-                    else:
-                        st.success(
-                            "Datos de la estación meteorológica más cercana "
-                            "con historial disponible."
-                        )
+                    st.markdown("**Condiciones actuales**")
 
                     st.caption(
-                        f"Último registro disponible: "
-                        f"{ultimo_registro['fecha'].date()} · "
-                        f"Antigüedad: {dias_desde_ultimo} días · "
-                        f"Fuente: {ultimo_registro['fuente_datos']}"
+                        f"{descripcion_tiempo(actual.get('weather_code'))}"
+                        f" · {actual.get('time', '')}"
                     )
 
-                    if dias_desde_ultimo > 7:
-                        st.warning(
-                            "Los datos disponibles son antiguos y deben "
-                            "interpretarse como información histórica, "
-                            "no como condiciones meteorológicas actuales."
-                        )
-                    elif dias_desde_ultimo < 0:
-                        st.warning(
-                            "La fecha del último registro es posterior "
-                            "a la fecha actual. Conviene revisar la fuente."
-                        )
+                    columnas = st.columns(3)
 
-                    def formato_meteo(valor, unidad):
-                        numero = pd.to_numeric(
-                            pd.Series([valor]),
-                            errors="coerce"
-                        ).iloc[0]
+                    variables = [
+                        ("Temperatura", "temperature_2m", "°C"),
+                        ("Humedad relativa", "relative_humidity_2m", "%"),
+                        ("Viento", "wind_speed_10m", "km/h")
+                    ]
 
-                        if pd.isna(numero):
-                            return "Sin dato"
+                    for columna, (nombre, clave, unidad) in zip(
+                        columnas, variables
+                    ):
 
-                        return f"{numero:.1f} {unidad}"
-
-                    col1, col2, col3, col4 = st.columns(4)
-
-                    col1.metric(
-                        "Temperatura mínima",
-                        formato_meteo(
-                            ultimo_registro["temperatura_min"], "°C"
-                        )
-                    )
-
-                    col2.metric(
-                        "Temperatura máxima",
-                        formato_meteo(
-                            ultimo_registro["temperatura_max"], "°C"
-                        )
-                    )
-
-                    col3.metric(
-                        "Humedad relativa",
-                        formato_meteo(
-                            ultimo_registro["humedad_relativa"], "%"
-                        )
-                    )
-
-                    col4.metric(
-                        "Precipitación",
-                        formato_meteo(
-                            ultimo_registro["precipitacion"], "mm"
-                        )
-                    )
-
-                else:
-                    st.info(
-                        "No hay una estación con historial suficiente "
-                        "para mostrar indicadores meteorológicos."
-                    )
-
-                    if seleccion_resumen:
-                        estacion_cercana = seleccion_resumen["estacion_mas_cercana"]
-                        st.write(
-                            f"**Estación más cercana:** "
-                            f"{estacion_cercana['nombre']} · "
-                            f"{estacion_cercana['distancia_km']} km"
-                        )
-
-                        for item in seleccion_resumen["diagnostico_estaciones"]:
-                            st.caption(
-                                f"{item['estacion']['nombre']}: "
-                                f"{item['estado']} — {item['motivo']}"
+                        columna.metric(
+                            nombre,
+                            formato_valor_meteo(
+                                actual.get(clave), unidad
                             )
-                    else:
-                        st.info(
-                            "No hay estaciones registradas para las "
-                            "coordenadas de esta viña."
                         )
 
-            except Exception as e:
-                st.warning(
-                    f"No se pudo cargar el resumen meteorológico: {e}"
+                except Exception:
+
+                    st.warning(
+                        "Las condiciones actuales no están "
+                        "disponibles temporalmente."
+                    )
+
+                st.divider()
+
+                try:
+
+                    historial = obtener_historial_local(
+                        lat, lon, 30
+                    )
+
+                    st.markdown("**Contexto meteorológico histórico**")
+
+                    st.caption(
+                        f"Período: {historial.fecha.min():%d-%m-%Y}"
+                        f" al {historial.fecha.max():%d-%m-%Y}"
+                    )
+
+                    columnas = st.columns(3)
+
+                    valores = [
+                        (
+                            "Temperatura máxima media",
+                            historial.temperatura_max.mean(),
+                            "°C"
+                        ),
+                        (
+                            "Humedad relativa media",
+                            historial.humedad_relativa.mean(),
+                            "%"
+                        ),
+                        (
+                            "Precipitación acumulada",
+                            historial.precipitacion.sum(min_count=1),
+                            "mm"
+                        )
+                    ]
+
+                    for columna, (nombre, valor, unidad) in zip(
+                        columnas, valores
+                    ):
+
+                        columna.metric(
+                            nombre,
+                            formato_valor_meteo(valor, unidad)
+                        )
+
+                    if historial.precipitacion.notna().sum() < 30:
+
+                        st.warning(
+                            "El acumulado de precipitación es parcial."
+                        )
+
+                except Exception:
+
+                    st.warning(
+                        "El historial meteorológico no está "
+                        "disponible temporalmente."
+                    )
+
+                st.caption(
+                    "Los datos de Open-Meteo son referenciales. "
+                    "Las mediciones directas del dispositivo "
+                    "deben interpretarse por separado."
                 )
 
-        else:
-            st.info(
-                "Registra la ubicación geográfica de tu viña "
-                "para incorporar información meteorológica."
+
+        with st.expander("Detalles del monitoreo e interpretación"):
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric("Plantas registradas", total_registradas)
+            col2.metric("Plantas sin historial", total_sin_historial)
+            col3.metric("Cuarteles", total_cuarteles)
+
+            col4, col5 = st.columns(2)
+
+            col4.metric("Variedades", total_variedades)
+            col5.metric("Registros históricos", total_mediciones)
+
+            st.caption(
+                f"Período considerado: "
+                f"{fecha_mas_antigua} a {fecha_ultima}."
             )
 
-        st.divider()
+            distribucion_fechas = (
+                datos_actuales["fecha"]
+                .value_counts()
+                .sort_index(ascending=False)
+                .rename_axis("Fecha de medición")
+                .reset_index(name="Cantidad de plantas")
+            )
 
-        # -----------------------------------------------------
-        # ACLARACIÓN SOBRE LOS RESULTADOS
-        # -----------------------------------------------------
+            st.markdown("**Antigüedad de las mediciones**")
 
-        st.subheader("¿Cómo interpretar este resumen?")
+            st.dataframe(
+                distribucion_fechas,
+                hide_index=True,
+                use_container_width=True
+            )
 
-        st.info(
-            "Los indicadores se calculan con las mediciones "
-            "más recientes de cada planta, que pueden "
-            "corresponder a fechas diferentes. "
-            "La antigüedad de los registros debe considerarse "
-            "antes de interpretar los resultados. "
-            "Las alertas utilizan los umbrales definidos en "
-            "la configuración de la plataforma. "
-            "Representan señales para revisión y no constituyen "
-            "por sí solas un diagnóstico agronómico definitivo."
-        )
+            st.caption(
+                "Las mediciones pueden corresponder a fechas "
+                "diferentes. Considera su antigüedad antes de "
+                "interpretar los resultados."
+            )
+
+            st.info(
+                "Las alertas se basan en los umbrales configurados. "
+                "Son señales para revisión y no constituyen por "
+                "sí solas un diagnóstico agronómico definitivo."
+            )
+
+
 
 # =========================================================
 # GALERÍA GENERAL DE FOTOGRAFÍAS Y ANÁLISIS IA
@@ -7557,7 +7248,7 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
 
 if seccion_actual == "Fotografías y análisis IA":
 
-    st.title("📸 Fotografías y análisis IA")
+    st.title("Fotografías e IA")
 
     st.caption(
         f"Galería fotográfica de {NOMBRE_VINA}"
@@ -7565,7 +7256,7 @@ if seccion_actual == "Fotografías y análisis IA":
 
     # DF.2.9 - Navegación por claros monitoreados
     modo_galeria = st.radio(
-        "Modo de consulta",
+        "Consultar fotografías",
         ["Claro monitoreado", "Todas las fotografías"],
         horizontal=True,
         key=f"df29_modo_{VINA_ID_ACTUAL}"
@@ -7607,8 +7298,8 @@ if seccion_actual == "Fotografías y análisis IA":
 
             if plantas_claro:
 
-                st.success(
-                    "Claro monitoreado: seis plantas configuradas."
+                st.caption(
+                    f"Claro monitoreado · {len(plantas_claro)} plantas configuradas"
                 )
 
                 opciones_plantas = {
@@ -7668,13 +7359,80 @@ if seccion_actual == "Fotografías y análisis IA":
             )
             imagenes = []
 
+    if modo_galeria == "Todas las fotografías" and imagenes:
+
+        col_cuartel, col_planta, col_fecha = st.columns(3)
+
+        cuarteles = sorted({
+            str(imagen[7])
+            for imagen in imagenes
+            if imagen[7] is not None
+        })
+
+        with col_cuartel:
+
+            filtro_cuartel = st.selectbox(
+                "Cuartel",
+                ["Todos"] + cuarteles,
+                key=f"galeria_filtro_cuartel_{VINA_ID_ACTUAL}"
+            )
+
+        if filtro_cuartel != "Todos":
+
+            imagenes = [
+                imagen for imagen in imagenes
+                if str(imagen[7]) == filtro_cuartel
+            ]
+
+        plantas = sorted({
+            str(imagen[6])
+            for imagen in imagenes
+            if imagen[6] is not None
+        })
+
+        with col_planta:
+
+            filtro_planta = st.selectbox(
+                "Planta",
+                ["Todas"] + plantas,
+                key=f"galeria_filtro_planta_{VINA_ID_ACTUAL}"
+            )
+
+        if filtro_planta != "Todas":
+
+            imagenes = [
+                imagen for imagen in imagenes
+                if str(imagen[6]) == filtro_planta
+            ]
+
+        fechas_galeria = sorted({
+            str(imagen[5])[:10]
+            for imagen in imagenes
+            if imagen[5] is not None
+        }, reverse=True)
+
+        with col_fecha:
+
+            filtro_fecha = st.selectbox(
+                "Fecha",
+                ["Todas"] + fechas_galeria,
+                key=f"galeria_filtro_fecha_{VINA_ID_ACTUAL}"
+            )
+
+        if filtro_fecha != "Todas":
+
+            imagenes = [
+                imagen for imagen in imagenes
+                if str(imagen[5])[:10] == filtro_fecha
+            ]
+
     if not imagenes:
 
         if modo_galeria == "Todas las fotografías":
             st.info(
-                "Esta viña todavía no tiene fotografías registradas. "
-                "Puedes comenzar agregándolas desde la ficha de cada planta "
-                "en Monitoreo de la viña."
+                "No hay fotografías disponibles para esta consulta. "
+                "Puedes cambiar los filtros o agregar fotografías "
+                "desde la ficha de una planta en Monitoreo."
             )
 
     else:
@@ -7709,240 +7467,248 @@ if seccion_actual == "Fotografías y análisis IA":
                     f"Planta {numero_planta if numero_planta is not None else '-'}"
                 )
 
-                with st.expander(titulo_foto, expanded=False):
+                with st.container(border=True):
 
                     ruta = obtener_ruta_fotografia_segura(ruta_archivo)
 
-                    st.markdown(
-                        f"**Cuartel {cuartel or 'Sin información'} · "
-                        f"Planta {numero_planta if numero_planta is not None else '-'}**"
-                    )
-
-                    st.caption(
-                        f"{variedad or 'Variedad sin información'} · "
-                        f"Fila {fila if fila is not None else '-'}"
-                    )
-
+                    st.markdown(f"**{titulo_foto}**")
+                    st.caption(variedad or "Variedad sin información")
                     st.caption(f"Fecha: {fecha_hora}")
 
-                    from database import (
-                        consultar_ambiente_fotografia
-                    )
+                    from PIL import Image, ImageOps
 
-                    try:
-
-                        ambiente_foto = consultar_ambiente_fotografia(
-                            image_id,
-                            VINA_ID_ACTUAL,
-                            usuario_actual["usuario_id"]
-                        )
-
-                    except PermissionError:
-
-                        ambiente_foto = None
-                        st.warning("Datos ambientales no autorizados.")
-
-                    if ambiente_foto is not None:
-
-                        st.markdown("**Condiciones ambientales de la captura**")
-
-                        temperatura_foto = ambiente_foto[
-                            "temperatura_ambiental"
-                        ]
-
-                        humedad_foto = ambiente_foto[
-                            "humedad_ambiental"
-                        ]
-
-                        c_temp, c_hum = st.columns(2)
-
-                        c_temp.metric(
-                            "Temperatura",
-                            f"{temperatura_foto:.1f} °C".replace(".", ",")
-                            if temperatura_foto is not None else "—"
-                        )
-
-                        c_hum.metric(
-                            "Humedad relativa",
-                            f"{humedad_foto:.1f} %".replace(".", ",")
-                            if humedad_foto is not None else "—"
-                        )
-
-                        st.caption(
-                            "Fuente: dispositivo "
-                            + ambiente_foto["device_id"]
-                        )
+                    fondo = Image.new("RGB", (480, 270), "#F0EDF3")
 
                     if ruta is not None:
+                        try:
+                            with Image.open(ruta) as original:
+                                miniatura = ImageOps.contain(
+                                    original.convert("RGB"),
+                                    (480, 270)
+                                )
 
-                        from PIL import Image, ImageOps
-
-                        with Image.open(ruta) as imagen_original:
-                            miniatura = ImageOps.fit(
-                                imagen_original.convert("RGB"),
-                                (320, 240),
-                                method=Image.Resampling.LANCZOS,
-                                centering=(0.5, 0.5)
+                            fondo.paste(
+                                miniatura,
+                                (
+                                    (480-miniatura.width)//2,
+                                    (270-miniatura.height)//2
+                                )
                             )
 
-                        st.image(
-                            miniatura,
-                            width="stretch"
-                        )
+                        except Exception:
+                            pass
+
+                    st.image(fondo, width="stretch")
+
+                    @st.dialog(
+                        "Fotografía y análisis IA",
+                        width="large",
+                        dismissible=True
+                    )
+                    def abrir_fotografia_galeria(
+                        image_id, ruta_archivo, titulo_foto,
+                        variedad, fecha_hora
+                    ):
 
                         if st.button(
-                            "🧠 Analizar fotografía",
-                            key=f"analizar_galeria_{image_id}"
+                            "Cerrar ventana",
+                            key=f"cerrar_galeria_{image_id}"
                         ):
+                            st.rerun()
 
-                            try:
+                        ruta = obtener_ruta_fotografia_segura(ruta_archivo)
 
-                                with st.spinner(
-                                    "Analizando fotografía..."
-                                ):
+                        st.markdown(f"**{titulo_foto}**")
 
-                                    resultado = analizar_uvas_roboflow(
-                                        str(ruta)
-                                    )
-
-                                    guardar_analisis_imagen(
-                                        image_id=image_id,
-                                        modelo=resultado["modelo"],
-                                        version_modelo=resultado["version_modelo"],
-                                        cantidad_racimos=None,
-                                        porcentaje_verde=None,
-                                        porcentaje_envero=None,
-                                        porcentaje_morado=None,
-                                        etapa_fenologica=None,
-                                        confianza=max(resultado["confianzas"], default=None),
-                                        resultado_json=json.dumps(
-                                            resultado,
-                                            ensure_ascii=False,
-                                            default=str
-                                        ),
-                                        vina_id=VINA_ID_ACTUAL
-                                    )
-
-                                st.success(
-                                    "Análisis realizado y guardado."
-                                )
-
-                            except Exception as e:
-
-                                st.error(
-                                    f"No se pudo analizar la fotografía: {e}"
-                                )
-
-                        historial = consultar_analisis_por_imagen(
-                            image_id,
-                            VINA_ID_ACTUAL
+                        st.caption(
+                            variedad or "Variedad sin información"
                         )
 
-                        if historial:
+                        st.caption(f"Fecha: {fecha_hora}")
 
-                            with st.expander(
-                                "📊 Ver historial de análisis"
-                            ):
+                        from database import (
+                            consultar_ambiente_fotografia
+                        )
 
-                                for registro in historial:
+                        try:
 
-                                    (
-                                        analisis_id,
-                                        imagen_id,
-                                        modelo,
-                                        version,
-                                        cantidad_racimos,
-                                        verde,
-                                        envero,
-                                        morado,
-                                        etapa,
-                                        confianza,
-                                        resultado_json,
-                                        fecha_analisis
-                                    ) = registro
+                            ambiente_foto = consultar_ambiente_fotografia(
+                                image_id,
+                                VINA_ID_ACTUAL,
+                                usuario_actual["usuario_id"]
+                            )
 
-                                    st.caption(
-                                        f"Análisis del {fecha_analisis}"
-                                    )
+                        except PermissionError:
 
-                                    st.write(
-                                        f"**Modelo:** {modelo} · Versión: {version}"
-                                    )
+                            ambiente_foto = None
+                            st.warning("Datos ambientales no autorizados.")
 
-                                    if resultado_json:
+                        if ambiente_foto is not None:
+                            with st.expander("Condiciones ambientales"):
 
-                                        datos_analisis = json.loads(
-                                            resultado_json
+
+
+                                temperatura_foto = ambiente_foto[
+                                    "temperatura_ambiental"
+                                ]
+
+                                humedad_foto = ambiente_foto[
+                                    "humedad_ambiental"
+                                ]
+
+                                c_temp, c_hum = st.columns(2)
+
+                                c_temp.metric(
+                                    "Temperatura",
+                                    f"{temperatura_foto:.1f} °C".replace(".", ",")
+                                    if temperatura_foto is not None else "—"
+                                )
+
+                                c_hum.metric(
+                                    "Humedad relativa",
+                                    f"{humedad_foto:.1f} %".replace(".", ",")
+                                    if humedad_foto is not None else "—"
+                                )
+
+                                st.caption(
+                                    "Fuente: dispositivo "
+                                    + ambiente_foto["device_id"]
+                                )
+
+                        if ruta is not None:
+
+                            st.image(str(ruta), width=500)
+
+                            mostrar_editor_fenologia(
+                                ruta, image_id, VINA_ID_ACTUAL, "galeria"
+                            )
+
+                            historial = consultar_analisis_por_imagen(
+                                image_id,
+                                VINA_ID_ACTUAL
+                            )
+
+                            if historial:
+
+                                with st.expander(
+                                    "Resultados e historial de IA"
+                                ):
+
+                                    for registro in historial:
+
+                                        (
+                                            analisis_id,
+                                            imagen_id,
+                                            modelo,
+                                            version,
+                                            cantidad_racimos,
+                                            verde,
+                                            envero,
+                                            morado,
+                                            etapa,
+                                            confianza,
+                                            resultado_json,
+                                            fecha_analisis
+                                        ) = registro
+
+                                        st.caption(
+                                            f"Análisis del {fecha_analisis}"
                                         )
 
-                                        if modelo == "Roboflow":
+                                        st.write(
+                                            f"**Modelo:** {modelo} · Versión: {version}"
+                                        )
 
-                                            st.metric(
-                                                "Detecciones de uvas",
-                                                datos_analisis.get(
-                                                    "cantidad_detecciones", 0
+                                        if resultado_json:
+
+                                            datos_analisis = json.loads(
+                                                resultado_json
+                                            )
+
+                                            if modelo == "FenologIA - SAM 2":
+                                                mostrar_resultados_fenologia(datos_analisis, f"historial_galeria_{image_id}_{analisis_id}")
+
+                                            elif modelo == "Roboflow":
+
+                                                st.metric(
+                                                    "Detecciones de uvas",
+                                                    datos_analisis.get(
+                                                        "cantidad_detecciones", 0
+                                                    )
                                                 )
-                                            )
 
-                                            confianzas = datos_analisis.get(
-                                                "confianzas", []
-                                            )
+                                                confianzas = datos_analisis.get(
+                                                    "confianzas", []
+                                                )
 
-                                            if confianzas:
+                                                if confianzas:
+                                                    st.caption(
+                                                        f"Confianza máxima: {max(confianzas):.2f}%"
+                                                    )
+                                                else:
+                                                    st.info(
+                                                        "No se encontraron detecciones "
+                                                        "sobre el umbral configurado."
+                                                    )
+
+                                                ruta_diagnostico = datos_analisis.get(
+                                                    "imagen_resultado"
+                                                )
+
+                                                ruta_diagnostico = (
+                                                    obtener_ruta_resultado_ia_segura(
+                                                        ruta_diagnostico,
+                                                        "roboflow"
+                                                    )
+                                                )
+
+                                                if ruta_diagnostico is not None:
+                                                    st.image(
+                                                        str(ruta_diagnostico),
+                                                        caption="Detecciones de Roboflow",
+                                                        width="stretch"
+                                                    )
+
                                                 st.caption(
-                                                    f"Confianza máxima: {max(confianzas):.2f}%"
-                                                )
-                                            else:
-                                                st.info(
-                                                    "No se encontraron detecciones "
-                                                    "sobre el umbral configurado."
+                                                    datos_analisis.get(
+                                                        "advertencia", ""
+                                                    )
                                                 )
 
-                                            ruta_diagnostico = datos_analisis.get(
-                                                "imagen_resultado"
-                                            )
+                                            elif modelo == "Segmentación HSV experimental":
 
-                                            ruta_diagnostico = (
-                                                obtener_ruta_resultado_ia_segura(
-                                                    ruta_diagnostico,
-                                                    "roboflow"
-                                                )
-                                            )
-
-                                            if ruta_diagnostico is not None:
-                                                st.image(
-                                                    str(ruta_diagnostico),
-                                                    caption="Detecciones de Roboflow",
-                                                    width="stretch"
+                                                st.write(
+                                                    f"Zonas verdes: "
+                                                    f"{datos_analisis.get('porcentaje_verde', 0)}%"
                                                 )
 
-                                            st.caption(
-                                                datos_analisis.get(
-                                                    "advertencia", ""
+                                                st.write(
+                                                    f"Zonas oscuras: "
+                                                    f"{datos_analisis.get('porcentaje_zonas_oscuras', 0)}%"
                                                 )
-                                            )
 
-                                        elif modelo == "Segmentación HSV experimental":
+                                            with st.expander(
+                                                "Ver detalles técnicos"
+                                            ):
+                                                st.json(datos_analisis)
 
-                                            st.write(
-                                                f"Zonas verdes: "
-                                                f"{datos_analisis.get('porcentaje_verde', 0)}%"
-                                            )
+                                        st.divider()
 
-                                            st.write(
-                                                f"Zonas oscuras: "
-                                                f"{datos_analisis.get('porcentaje_zonas_oscuras', 0)}%"
-                                            )
+                        else:
 
-                                        with st.expander(
-                                            "Ver detalles técnicos"
-                                        ):
-                                            st.json(datos_analisis)
+                            st.warning(
+                                f"No se encontró el archivo: {ruta_archivo}"
+                            )
 
-                                    st.divider()
 
-                    else:
-
-                        st.warning(
-                            f"No se encontró el archivo: {ruta_archivo}"
+                    if st.button(
+                        "Ver fotografía y análisis",
+        type="primary",
+        icon=":material/open_in_new:",
+                        key=f"abrir_galeria_{image_id}",
+                        width="stretch"
+                    ):
+                        abrir_fotografia_galeria(
+                            image_id, ruta_archivo, titulo_foto,
+                            variedad, fecha_hora
                         )

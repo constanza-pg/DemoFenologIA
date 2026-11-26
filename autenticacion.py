@@ -153,6 +153,18 @@ def verificar_usuario(email, password):
     if not verificar_hash(password, usuario[4]):
         return None
 
+
+    if usuario[5] == "investigador":
+        with conectar() as conexion:
+            perfil = conexion.execute(
+                "SELECT estado FROM perfiles_investigadores "
+                "WHERE usuario_id = ?",
+                (usuario[0],)
+            ).fetchone()
+
+        if perfil is None or perfil[0] != "aprobado":
+            return None
+
     return {
         "usuario_id": usuario[0],
         "vina_id": usuario[1],
@@ -290,6 +302,18 @@ def consultar_usuario_activo(usuario_id):
     if usuario is None:
         return None
 
+
+    if usuario[4] == "investigador":
+        with conectar() as conexion:
+            perfil = conexion.execute(
+                "SELECT estado FROM perfiles_investigadores "
+                "WHERE usuario_id = ?",
+                (usuario[0],)
+            ).fetchone()
+
+        if perfil is None or perfil[0] != "aprobado":
+            return None
+
     return {
         "usuario_id": usuario[0],
         "vina_id": usuario[1],
@@ -297,4 +321,100 @@ def consultar_usuario_activo(usuario_id):
         "email": usuario[3],
         "rol": usuario[4]
     }
+
+
+
+def registrar_investigador(
+    nombre,
+    email,
+    institucion,
+    area_investigacion,
+    finalidad,
+    password,
+    confirmar_password
+):
+    """Registra una solicitud de investigador pendiente."""
+
+    nombre = nombre.strip()
+    email = email.strip().lower()
+    institucion = institucion.strip()
+    area_investigacion = area_investigacion.strip()
+    finalidad = finalidad.strip()
+
+    if not all([
+        nombre,
+        institucion,
+        area_investigacion,
+        finalidad
+    ]):
+        raise ValueError(
+            "Debes completar todos los campos."
+        )
+
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError(
+            "El correo electronico no es valido."
+        )
+
+    if len(password) < 10:
+        raise ValueError(
+            "La contrasena debe tener al menos 10 caracteres."
+        )
+
+    if password != confirmar_password:
+        raise ValueError(
+            "Las contrasenas no coinciden."
+        )
+
+    usuario_id = str(uuid.uuid4())
+    password_hash = generar_hash(password)
+
+    with conectar() as conexion:
+
+        existente = conexion.execute("""
+            SELECT usuario_id
+            FROM usuarios
+            WHERE email = ?
+        """, (email,)).fetchone()
+
+        if existente:
+            raise ValueError(
+                "Este correo ya esta registrado."
+            )
+
+        conexion.execute("""
+            INSERT INTO usuarios (
+                usuario_id,
+                vina_id,
+                nombre,
+                email,
+                password_hash,
+                rol,
+                activo
+            )
+            VALUES (?, NULL, ?, ?, ?, 'investigador', 0)
+        """, (
+            usuario_id,
+            nombre,
+            email,
+            password_hash
+        ))
+
+        conexion.execute("""
+            INSERT INTO perfiles_investigadores (
+                usuario_id,
+                institucion,
+                area_investigacion,
+                finalidad,
+                estado
+            )
+            VALUES (?, ?, ?, ?, 'pendiente')
+        """, (
+            usuario_id,
+            institucion,
+            area_investigacion,
+            finalidad
+        ))
+
+    return usuario_id
 

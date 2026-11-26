@@ -291,30 +291,93 @@ def consultar_vina(vina_id):
 
 
 
+def actualizar_esquema_ubicacion():
+
+    with conectar() as conexion:
+
+        columnas = {
+            fila[1]
+            for fila in conexion.execute(
+                "PRAGMA table_info(vinas)"
+            )
+        }
+
+        for campo in ("region", "comuna", "direccion"):
+
+            if campo not in columnas:
+
+                conexion.execute(
+                    f"ALTER TABLE vinas ADD COLUMN {campo} TEXT"
+                )
+
+
+def consultar_ubicacion_detallada(vina_id):
+
+    actualizar_esquema_ubicacion()
+
+    with conectar() as conexion:
+
+        fila = conexion.execute("""
+            SELECT ubicacion, latitud, longitud,
+                   region, comuna, direccion
+            FROM vinas
+            WHERE id = ?
+        """, (vina_id,)).fetchone()
+
+    if fila is None:
+        return None
+
+    return dict(zip(
+        [
+            "ubicacion", "latitud", "longitud",
+            "region", "comuna", "direccion"
+        ],
+        fila
+    ))
+
+
 def actualizar_ubicacion_vina(
     vina_id,
     ubicacion,
     latitud,
-    longitud
+    longitud,
+    usuario_id=None,
+    region=None,
+    comuna=None,
+    direccion=None,
+    permitir_modificacion=False
 ):
-    """Registra la ubicación geográfica inicial de una viña.
-    Una vez registrada, no permite modificarla.
-    """
 
-    if latitud is None or longitud is None:
-        raise ValueError(
-            "Debes ingresar latitud y longitud."
-        )
+    import math
+    from regiones_chile import REGIONES_CHILE
+
+    if region not in REGIONES_CHILE:
+        raise ValueError("Selecciona una región válida.")
+
+    if comuna not in REGIONES_CHILE[region]:
+        raise ValueError("Selecciona una comuna válida.")
+
+    if not direccion or not direccion.strip():
+        raise ValueError("Ingresa la dirección o referencia.")
+
+    latitud = float(latitud)
+    longitud = float(longitud)
+
+    if not math.isfinite(latitud) or not math.isfinite(longitud):
+        raise ValueError("Las coordenadas no son válidas.")
 
     if not -90 <= latitud <= 90:
-        raise ValueError("La latitud no es válida.")
+        raise ValueError("Latitud inválida.")
 
     if not -180 <= longitud <= 180:
-        raise ValueError("La longitud no es válida.")
+        raise ValueError("Longitud inválida.")
 
     with conectar() as conexion:
 
-        # Verificar que la viña exista
+        verificar_administrador_vina(
+            conexion, usuario_id, vina_id
+        )
+
         vina = conexion.execute("""
             SELECT latitud, longitud
             FROM vinas
@@ -322,21 +385,26 @@ def actualizar_ubicacion_vina(
         """, (vina_id,)).fetchone()
 
         if vina is None:
-            raise ValueError("La viña indicada no existe.")
+            raise ValueError("La viña no existe.")
 
-        # Impedir modificar una ubicación ya registrada
-        if vina[0] is not None or vina[1] is not None:
+        registrada = (
+            vina[0] is not None or vina[1] is not None
+        )
+
+        if registrada:
             raise ValueError(
                 "La ubicación de esta viña ya fue registrada "
                 "y no se puede modificar."
             )
 
-        # Registrar la ubicación por primera vez
         resultado = conexion.execute("""
             UPDATE vinas
             SET ubicacion = ?,
                 latitud = ?,
-                longitud = ?
+                longitud = ?,
+                region = ?,
+                comuna = ?,
+                direccion = ?
             WHERE id = ?
               AND latitud IS NULL
               AND longitud IS NULL
@@ -344,13 +412,17 @@ def actualizar_ubicacion_vina(
             ubicacion,
             latitud,
             longitud,
+            region,
+            comuna,
+            direccion.strip(),
             vina_id
         ))
 
-        if resultado.rowcount == 0:
+        if resultado.rowcount != 1:
             raise ValueError(
-                "No se pudo registrar la ubicación."
+                "No se pudo guardar la ubicación."
             )
+
 
 def registrar_dispositivos_iniciales():
     """Registra los módulos iniciales sin cambiar su propietario."""
@@ -1349,18 +1421,30 @@ def actualizar_esquema_multi_vina():
         # 4. Garantizar que exista la tabla de usuarios
         conexion.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
-                usuario_id TEXT PRIMARY KEY,
-                vina_id TEXT NOT NULL,
-                nombre TEXT NOT NULL,
-                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                password_hash TEXT NOT NULL,
-                rol TEXT NOT NULL DEFAULT 'administrador'
-                    CHECK (rol IN ('administrador', 'usuario')),
-                activo INTEGER NOT NULL DEFAULT 1
-                    CHECK (activo IN (0, 1)),
-                fecha_registro TEXT DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (vina_id) REFERENCES vinas(id)
-            )
+    usuario_id TEXT PRIMARY KEY,
+    vina_id TEXT,
+    nombre TEXT NOT NULL,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    password_hash TEXT NOT NULL,
+    rol TEXT NOT NULL DEFAULT 'administrador'
+        CHECK (rol IN (
+            'administrador',
+            'usuario',
+            'investigador'
+        )),
+    activo INTEGER NOT NULL DEFAULT 1
+        CHECK (activo IN (0, 1)),
+    fecha_registro TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    CHECK (
+        (rol = 'investigador' AND vina_id IS NULL)
+        OR
+        (rol IN ('administrador', 'usuario')
+         AND vina_id IS NOT NULL)
+    ),
+
+    FOREIGN KEY (vina_id) REFERENCES vinas(id)
+)
         """)
 
         conexion.execute("""
@@ -2171,7 +2255,7 @@ def guardar_informe_dmc_re1034(informe, catalogo_estaciones):
     Guarda las estaciones DMC del informe RE1034 y sus siete
     mediciones por estación, utilizando el catálogo RE7001.
 
-    Las estaciones de otros propietarios se excluyen.
+    Se conservan las instituciones propietarias.
     Los registros existentes se actualizan sin duplicarse.
     """
 
@@ -2237,9 +2321,6 @@ def guardar_informe_dmc_re1034(informe, catalogo_estaciones):
 
         propietario = datos_catalogo.get("propietario", "").strip()
 
-        # Excluir estaciones que no pertenecen a la DMC.
-        if propietario != "Dirección Meteorológica de Chile":
-            continue
 
         estacion_id = f"DMC_{codigo}"
 
@@ -2337,7 +2418,7 @@ def guardar_informe_dmc_re1034(informe, catalogo_estaciones):
 
     if not estaciones_para_guardar:
         raise ValueError(
-            "No se encontraron estaciones propiedad de la DMC "
+            "No se encontraron estaciones válidas "
             "para guardar."
         )
 
@@ -3710,3 +3791,63 @@ def consultar_ambiente_fotografia(
             "device_id",
             "fecha_hora"
         ), fila))
+
+
+def inicializar_investigacion():
+    """Inicializa las tablas del modulo de investigacion."""
+
+    with conectar() as conexion:
+        conexion.execute("""
+
+CREATE TABLE IF NOT EXISTS perfiles_investigadores (
+    usuario_id TEXT PRIMARY KEY,
+    institucion TEXT NOT NULL,
+    area_investigacion TEXT NOT NULL,
+    finalidad TEXT NOT NULL,
+    estado TEXT NOT NULL DEFAULT 'pendiente'
+        CHECK (estado IN (
+            'pendiente',
+            'aprobado',
+            'rechazado',
+            'suspendido'
+        )),
+    fecha_solicitud TEXT DEFAULT CURRENT_TIMESTAMP,
+    fecha_aprobacion TEXT,
+    FOREIGN KEY (usuario_id)
+        REFERENCES usuarios(usuario_id)
+)
+        """)
+
+        conexion.execute("""
+
+CREATE TABLE IF NOT EXISTS autorizaciones_investigacion (
+    vina_id TEXT PRIMARY KEY,
+    autorizado INTEGER NOT NULL DEFAULT 0
+        CHECK (autorizado IN (0, 1)),
+    codigo_publico TEXT NOT NULL UNIQUE,
+    autorizado_por TEXT,
+    fecha_actualizacion TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (vina_id)
+        REFERENCES vinas(id),
+
+    FOREIGN KEY (autorizado_por)
+        REFERENCES usuarios(usuario_id)
+)
+        """)
+
+        conexion.execute("""
+
+CREATE TABLE IF NOT EXISTS auditoria_investigacion (
+    auditoria_id TEXT PRIMARY KEY,
+    usuario_id TEXT NOT NULL,
+    accion TEXT NOT NULL
+        CHECK (accion IN ('consulta', 'exportacion')),
+    filtros_json TEXT DEFAULT '{}',
+    cantidad_registros INTEGER,
+    fecha_hora TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (usuario_id)
+        REFERENCES usuarios(usuario_id)
+)
+        """)

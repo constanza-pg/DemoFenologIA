@@ -37,3 +37,17 @@ respaldos/
 # Editores
 .vscode/
 .idea/
+
+# Recursos audiovisuales locales
+tutoriales/
+*.mov
+*.mp4
+
+# Importaciones y exportaciones locales
+*.zip
+*.xlsx
+*.csv
+
+# Archivos auxiliares de SQLite
+*.sqlite-*
+*.sqlite3-*
