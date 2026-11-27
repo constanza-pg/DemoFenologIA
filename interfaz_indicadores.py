@@ -6,7 +6,7 @@ from database import conectar, verificar_permiso_mediciones
 
 from configuracion_indicadores import (
     consultar_configuracion_indicadores,
-    guardar_configuracion_indicador
+    guardar_configuracion_indicadores
 )
 
 
@@ -98,76 +98,95 @@ def mostrar_configuracion_indicadores(usuario, vina_id):
             "para comenzar a evaluar alertas."
         )
 
-    for parametro, (nombre, unidad) in INDICADORES_UI.items():
 
-        criterio = criterios.get((parametro, variedad))
-        origen = "Configuración propia"
+    clave_formulario = (
+        f"indicadores_{usuario_id}_{vina_id}_{variedad}"
+    )
 
-        if criterio is None and variedad:
-            criterio = criterios.get((parametro, ""))
-            origen = "Configuración general heredada"
+    clave_mensaje = clave_formulario + "_mensaje"
 
-        if criterio is None:
-            criterio = {}
-            origen = "Sin configuración"
+    if st.session_state.pop(clave_mensaje, False):
+        st.success("Todos los indicadores fueron guardados.")
 
-        clave = f"indicador_{vina_id}_{parametro}_{variedad}"
+    cambios = []
 
-        with st.container(border=True):
+    with st.form(clave_formulario):
 
-            st.markdown(f"**{nombre}**")
-            st.caption(f"Unidad: {unidad} · {origen}")
+        for parametro, (nombre, unidad) in INDICADORES_UI.items():
 
-            minimo = criterio.get("valor_minimo")
-            maximo = criterio.get("valor_maximo")
+            criterio = criterios.get((parametro, variedad))
+            origen = "Configuración propia"
 
-            with st.form(clave):
+            if criterio is None and variedad:
+                criterio = criterios.get((parametro, ""))
+                origen = "Configuración general heredada"
+
+            if criterio is None:
+                criterio = {}
+                origen = "Sin configuración"
+
+            clave = f"{clave_formulario}_{parametro}"
+
+            with st.container(border=True):
+
+                st.markdown(f"**{nombre}**")
+                st.caption(f"Unidad: {unidad} · {origen}")
 
                 activa = st.checkbox(
-                    "Activar alerta",
+                    "Usar para alerta",
                     value=bool(criterio.get("alerta_activa", 0)),
-                    disabled=not es_admin
+                    disabled=not es_admin,
+                    key=clave + "_alerta"
                 )
 
                 c1, c2 = st.columns(2)
 
                 with c1:
-                    minimo_nuevo = st.number_input(
+                    minimo = st.number_input(
                         "Valor mínimo",
-                        value=minimo,
+                        value=criterio.get("valor_minimo"),
                         step=0.01,
                         format="%.2f",
-                        disabled=not es_admin
+                        disabled=not es_admin,
+                        key=clave + "_min"
                     )
 
                 with c2:
-                    maximo_nuevo = st.number_input(
+                    maximo = st.number_input(
                         "Valor máximo",
-                        value=maximo,
+                        value=criterio.get("valor_maximo"),
                         step=0.01,
                         format="%.2f",
-                        disabled=not es_admin
+                        disabled=not es_admin,
+                        key=clave + "_max"
                     )
 
-                guardar = st.form_submit_button(
-                    "Guardar indicador",
-                    disabled=not es_admin
-                )
+                cambios.append({
+                    "parametro": parametro,
+                    "valor_minimo": minimo,
+                    "valor_maximo": maximo,
+                    "alerta_activa": activa
+                })
 
-            if guardar:
+        guardar = st.form_submit_button(
+            "Guardar todos los indicadores",
+            disabled=not es_admin,
+            type="primary",
+            use_container_width=True
+        )
 
-                try:
-                    guardar_configuracion_indicador(
-                        usuario_id=usuario_id,
-                        vina_id=vina_id,
-                        parametro=parametro,
-                        valor_minimo=minimo_nuevo,
-                        valor_maximo=maximo_nuevo,
-                        alerta_activa=activa,
-                        variedad=variedad
-                    )
+    if guardar:
 
-                    st.success("Configuración guardada.")
+        try:
+            guardar_configuracion_indicadores(
+                usuario_id=usuario_id,
+                vina_id=vina_id,
+                indicadores=cambios,
+                variedad=variedad
+            )
 
-                except (ValueError, PermissionError) as error:
-                    st.error(str(error))
+            st.session_state[clave_mensaje] = True
+            st.rerun()
+
+        except (ValueError, PermissionError) as error:
+            st.error(str(error))

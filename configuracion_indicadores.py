@@ -92,7 +92,7 @@ def consultar_configuracion_indicadores(usuario_id, vina_id):
         return [dict(fila) for fila in filas]
 
 
-def guardar_configuracion_indicador(
+def _preparar_configuracion_indicador(
     usuario_id,
     vina_id,
     parametro,
@@ -140,52 +140,99 @@ def guardar_configuracion_indicador(
             "Debes definir al menos un límite."
         )
 
+
+    return (
+        vina_id, parametro, variedad,
+        etapa_fenologica, minimo, maximo,
+        int(bool(alerta_activa)), usuario_id
+    )
+
+
+
+def _escribir_configuracion_indicador(conexion, registro):
+    conexion.execute("""
+        INSERT INTO configuracion_indicadores (
+            vina_id,
+            parametro,
+            variedad,
+            etapa_fenologica,
+            valor_minimo,
+            valor_maximo,
+            alerta_activa,
+            actualizado_por
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+
+        ON CONFLICT (
+            vina_id,
+            parametro,
+            variedad,
+            etapa_fenologica
+        )
+
+        DO UPDATE SET
+            valor_minimo = excluded.valor_minimo,
+            valor_maximo = excluded.valor_maximo,
+            alerta_activa = excluded.alerta_activa,
+            actualizado_por = excluded.actualizado_por,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+
+    """, registro)
+
+
+
+def guardar_configuracion_indicadores(
+    usuario_id, vina_id, indicadores, variedad=""
+):
+    registros = [
+        _preparar_configuracion_indicador(
+            usuario_id=usuario_id,
+            vina_id=vina_id,
+            variedad=variedad,
+            **indicador
+        )
+        for indicador in indicadores
+    ]
+
+    if not registros:
+        raise ValueError("No hay indicadores para guardar.")
+
     with closing(conectar()) as conexion:
         with conexion:
-
             conexion.execute("BEGIN IMMEDIATE")
 
             verificar_administrador_vina(
                 conexion, usuario_id, vina_id
             )
 
-            conexion.execute("""
-                INSERT INTO configuracion_indicadores (
-                    vina_id,
-                    parametro,
-                    variedad,
-                    etapa_fenologica,
-                    valor_minimo,
-                    valor_maximo,
-                    alerta_activa,
-                    actualizado_por
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-
-                ON CONFLICT (
-                    vina_id,
-                    parametro,
-                    variedad,
-                    etapa_fenologica
+            for registro in registros:
+                _escribir_configuracion_indicador(
+                    conexion, registro
                 )
 
-                DO UPDATE SET
-                    valor_minimo = excluded.valor_minimo,
-                    valor_maximo = excluded.valor_maximo,
-                    alerta_activa = excluded.alerta_activa,
-                    actualizado_por = excluded.actualizado_por,
-                    fecha_actualizacion = CURRENT_TIMESTAMP
 
-            """, (
-                vina_id,
-                parametro,
-                variedad,
-                etapa_fenologica,
-                minimo,
-                maximo,
-                int(bool(alerta_activa)),
-                usuario_id
-            ))
+def guardar_configuracion_indicador(
+    usuario_id,
+    vina_id,
+    parametro,
+    valor_minimo=None,
+    valor_maximo=None,
+    alerta_activa=False,
+    variedad="",
+    etapa_fenologica=""
+):
+    guardar_configuracion_indicadores(
+        usuario_id,
+        vina_id,
+        [{
+            "parametro": parametro,
+            "valor_minimo": valor_minimo,
+            "valor_maximo": valor_maximo,
+            "alerta_activa": alerta_activa,
+            "etapa_fenologica": etapa_fenologica
+        }],
+        variedad=variedad
+    )
 
 
 def preparar_criterios_alerta(configuraciones):
