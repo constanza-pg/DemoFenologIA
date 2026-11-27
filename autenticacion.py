@@ -262,7 +262,7 @@ def registrar_vina_administrador(
                 ubicacion,
                 entorno
             )
-            VALUES (?, ?, ?, 'operacional')
+            VALUES (?, ?, ?, 'prueba')
         """, (
             vina_id,
             nombre_vina,

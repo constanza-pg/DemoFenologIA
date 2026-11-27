@@ -72,6 +72,9 @@ from interfaz_fenologia import (
 
 from autenticacion import verificar_usuario, crear_usuario, registrar_vina_administrador, consultar_usuario_activo
 
+from preparar_produccion import preparar_directorios
+
+preparar_directorios()
 inicializar_bd()
 from database import inicializar_investigacion
 inicializar_investigacion()
