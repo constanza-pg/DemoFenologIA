@@ -116,10 +116,20 @@ def _preparar_configuracion_indicador(
 
     def validar_valor(valor):
 
-        if valor is None or valor == "":
+        if valor is None:
             return None
 
-        numero = float(valor)
+        if isinstance(valor, str):
+            valor = valor.strip().replace(",", ".")
+            if not valor:
+                return None
+
+        try:
+            numero = float(valor)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"{parametro}: ingresa un valor numerico valido."
+            )
 
         if not math.isfinite(numero):
             raise ValueError("El valor debe ser finito.")

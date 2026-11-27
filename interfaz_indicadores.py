@@ -142,23 +142,21 @@ def mostrar_configuracion_indicadores(usuario, vina_id):
                 c1, c2 = st.columns(2)
 
                 with c1:
-                    minimo = st.number_input(
+                    minimo = st.text_input(
                         "Valor mínimo",
-                        value=criterio.get("valor_minimo"),
-                        step=0.01,
-                        format="%.2f",
+                        value="" if criterio.get("valor_minimo") is None else str(criterio["valor_minimo"]),
+                        placeholder="Ej. 0,50",
                         disabled=not es_admin,
-                        key=clave + "_min"
+                        key=clave + "_min_texto"
                     )
 
                 with c2:
-                    maximo = st.number_input(
+                    maximo = st.text_input(
                         "Valor máximo",
-                        value=criterio.get("valor_maximo"),
-                        step=0.01,
-                        format="%.2f",
+                        value="" if criterio.get("valor_maximo") is None else str(criterio["valor_maximo"]),
+                        placeholder="Ej. 0,50",
                         disabled=not es_admin,
-                        key=clave + "_max"
+                        key=clave + "_max_texto"
                     )
 
                 cambios.append({
