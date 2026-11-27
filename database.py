@@ -115,7 +115,7 @@ def verificar_administrador_vina(conexion, usuario_id, vina_id):
 
     return True
 
-def inicializar_bd():
+def inicializar_bd(*, crear_demo=False):
 
     with conectar() as conexion:
 
@@ -248,11 +248,12 @@ def inicializar_bd():
             )
         """)
 
-        # Registrar nuestra primera viña de prueba
-        conexion.execute("""
-            INSERT OR IGNORE INTO vinas (id, nombre, ubicacion)
-            VALUES (?, ?, ?)
-        """, ("VINA001", "Viña de prueba", "Por definir"))
+        if crear_demo:
+            # Registrar nuestra primera viña de prueba
+            conexion.execute("""
+                INSERT OR IGNORE INTO vinas (id, nombre, ubicacion)
+                VALUES (?, ?, ?)
+            """, ("VINA001", "Viña de prueba", "Por definir"))
 
 
 def consultar_tablas():

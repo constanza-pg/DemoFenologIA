@@ -389,7 +389,9 @@ if st.session_state["usuario"] is None:
 
     import os
 
-    registro_habilitado = False
+    registro_habilitado = len(
+        os.environ.get("FENOLOGIA_CODIGO_REGISTRO", "")
+    ) >= 24
 
     st.markdown("""
     <style>
@@ -785,6 +787,11 @@ if st.session_state["usuario"] is None:
                 type="password"
             )
 
+            codigo_invitacion = st.text_input(
+                "Código de invitación",
+                type="password"
+            )
+
             registrar = st.form_submit_button(
                 "🍇 Crear cuenta",
                 use_container_width=True
@@ -797,7 +804,8 @@ if st.session_state["usuario"] is None:
                         nombre_administrador,
                         email_registro,
                         password_registro,
-                        confirmar_password
+                        confirmar_password,
+                        codigo_invitacion=codigo_invitacion
                     )
 
                     st.success(
@@ -817,8 +825,8 @@ if st.session_state["usuario"] is None:
 
     else:
         st.info(
-            "La creación de cuentas estará disponible "
-            "cuando finalicemos las pruebas de seguridad."
+            "El registro de nuevas viñas requiere "
+            "una invitación autorizada."
         )
 
     st.stop()
@@ -1171,103 +1179,6 @@ if seccion_actual == "FenologIA":
                 navegar_fenologia("Mapa y monitoreo de plantas")
                 st.rerun()
 
-
-    with st.container(border=True):
-
-        st.markdown("### Tutoriales y presentación")
-
-        st.caption(
-            "Conoce FenologIA y aprende a utilizar "
-            "cada sección de la plataforma."
-        )
-
-        @st.dialog("Centro de ayuda FenologIA", width="large")
-        def abrir_centro_ayuda():
-
-            st.markdown("### Bienvenido a FenologIA")
-
-            st.write(
-                "Plataforma de monitoreo vitícola que integra "
-                "información de plantas, meteorología, "
-                "fotografías e inteligencia artificial."
-            )
-
-            recursos = Path(__file__).resolve().parent / "tutoriales"
-
-            st.markdown("### Presentación de la plataforma")
-
-            presentacion = recursos / "presentacion.pdf"
-
-            if presentacion.is_file():
-                st.download_button(
-                    "Descargar presentación",
-                    data=presentacion.read_bytes(),
-                    file_name="Presentacion_FenologIA.pdf",
-                    mime="application/pdf",
-                    key="descargar_presentacion_fenologia"
-                )
-            else:
-                st.caption("Presentación próximamente disponible.")
-
-            st.divider()
-            st.markdown("### Videotutoriales")
-
-            secciones = [
-                (
-                    "Diagnóstico",
-                    "Interpreta los indicadores y alertas de tu viña.",
-                    "02_diagnostico.mp4"
-                ),
-                (
-                    "Mapa y monitoreo",
-                    "Consulta plantas e importa nuevas mediciones.",
-                    "03_monitoreo.mp4"
-                ),
-                (
-                    "Meteorología",
-                    "Consulta condiciones actuales, historial y pronóstico.",
-                    "04_meteorologia.mp4"
-                ),
-                (
-                    "Fotografías e IA",
-                    "Revisa fotografías y realiza análisis de racimos.",
-                    "05_fotografias_ia.mp4"
-                ),
-                (
-                    "Mi viña",
-                    "Configura y administra la información de tu viña.",
-                    "06_mi_vina.mp4"
-                )
-            ]
-
-            for titulo, descripcion, nombre in secciones:
-
-                with st.container(border=True):
-
-                    st.markdown(f"**{titulo}**")
-                    st.caption(descripcion)
-
-                    video = recursos / nombre
-
-                    if video.is_file():
-                        st.video(str(video))
-                    else:
-                        st.caption("Videotutorial próximamente disponible.")
-
-            if st.button(
-                "Cerrar ventana",
-                key="cerrar_centro_ayuda"
-            ):
-                st.rerun()
-
-        if st.button(
-            "Ver tutoriales y presentación",
-            key="inicio_centro_ayuda",
-            icon=":material/school:",
-            type="primary",
-            width="stretch"
-        ):
-            abrir_centro_ayuda()
 
     st.stop()
 

@@ -84,7 +84,7 @@ if faltantes:
 
 datos = contexto["generar_datos"]()
 
-database.inicializar_bd()
+database.inicializar_bd(crear_demo=True)
 database.actualizar_esquema_transferencias()
 database.actualizar_esquema_multi_vina()
 database.actualizar_esquema_claros()

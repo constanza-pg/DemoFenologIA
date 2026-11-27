@@ -1,4 +1,5 @@
 import hashlib
+import os
 import hmac
 import secrets
 import uuid
@@ -179,13 +180,33 @@ def registrar_vina_administrador(
     nombre_administrador,
     email,
     password,
-    confirmar_password
+    confirmar_password,
+    *,
+    codigo_invitacion=""
 ):
     """
     Registra una nueva viña y su primer administrador.
 
     Ambas operaciones se realizan en una única transacción.
     """
+
+    codigo_servidor = os.environ.get(
+        "FENOLOGIA_CODIGO_REGISTRO", ""
+    )
+
+    if (
+        len(codigo_servidor) < 24
+        or not isinstance(codigo_invitacion, str)
+        or not hmac.compare_digest(
+            codigo_servidor.encode("utf-8"),
+            codigo_invitacion.encode("utf-8")
+        )
+    ):
+        raise ValueError(
+            "Código de invitación incorrecto "
+            "o registro no disponible."
+        )
+
 
     if not isinstance(nombre_vina, str):
         raise ValueError("El nombre de la viña no es válido.")
@@ -238,9 +259,10 @@ def registrar_vina_administrador(
             INSERT INTO vinas (
                 id,
                 nombre,
-                ubicacion
+                ubicacion,
+                entorno
             )
-            VALUES (?, ?, ?)
+            VALUES (?, ?, ?, 'operacional')
         """, (
             vina_id,
             nombre_vina,
