@@ -1,0 +1,26 @@
+{
+  "plataforma": "FenologIA",
+  "version": "1.0",
+  "estado": "experimental",
+  "dispositivo": "CPU",
+  "modelos": [
+    {
+      "archivo": "modelos/sam2_t.pt",
+      "funcion": "Segmentacion de racimos",
+      "bytes": 78064050,
+      "sha256": "94375f988270836169320bd901960c67b5770e8bef3867d70102f01a8b5ca501"
+    },
+    {
+      "archivo": "modelos/yolov8s-worldv2.pt",
+      "funcion": "Sugerencia de detecciones",
+      "bytes": 25923032,
+      "sha256": "9b2c17ab6124a913e9b3a5c170617920d91b0f01111a8479da69f00e2cf27792"
+    },
+    {
+      "archivo": "weights/clip/ViT-B-32.pt",
+      "funcion": "Soporte semantico de YOLO-World",
+      "bytes": 353976522,
+      "sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
+    }
+  ]
+}

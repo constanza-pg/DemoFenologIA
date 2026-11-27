@@ -22,13 +22,13 @@ COLORES = {
 
 @lru_cache(maxsize=1)
 def cargar_segmentador():
-    return SAM(str(BASE / "sam2_t.pt"))
+    return SAM(str(BASE / "modelos" / "sam2_t.pt"))
 
 
 @lru_cache(maxsize=1)
 def cargar_detector():
     modelo = YOLOWorld(
-        str(BASE / "yolov8s-worldv2.pt")
+        str(BASE / "modelos" / "yolov8s-worldv2.pt")
     )
     modelo.set_classes(["grapes"])
     return modelo

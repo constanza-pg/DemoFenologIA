@@ -60,10 +60,6 @@ from database import (
     conectar,
     consultar_vina,
     actualizar_ubicacion_vina,
-    consultar_estaciones_cercanas,
-    consultar_mediciones_meteorologicas,
-    consultar_mediciones_dmc_precipitacion,
-    consultar_mediciones_dmc_re1034,
     actualizar_esquema_claros,
     guardar_claro_monitoreado,
     consultar_claro_monitoreado,
@@ -79,9 +75,14 @@ from autenticacion import verificar_usuario, crear_usuario, registrar_vina_admin
 inicializar_bd()
 from database import inicializar_investigacion
 inicializar_investigacion()
+from database import actualizar_esquema_procedencia
 
 from configuracion_indicadores import (
-    inicializar_configuracion_indicadores
+    inicializar_configuracion_indicadores,
+    consultar_configuracion_indicadores,
+    preparar_criterios_alerta,
+    evaluar_indicadores_planta,
+    evaluar_indicadores_dataframe
 )
 
 inicializar_configuracion_indicadores()
@@ -95,8 +96,13 @@ actualizar_esquema_claros()
 actualizar_esquema_capturas_dispositivo()
 
 actualizar_esquema_imagenes_dispositivo()
-
+actualizar_esquema_procedencia()
+from database import actualizar_esquema_entorno_vinas
+actualizar_esquema_entorno_vinas()
+from database import inicializar_procedencia_automatica
 actualizar_vista_imagenes_origen()
+
+inicializar_procedencia_automatica()
 
 # =====================================================================
 # 1. CONFIGURACIÓN
@@ -126,7 +132,7 @@ PARAMETROS = {
 }
 
 # Alertas: parámetro -> (operador, umbral). Se muestran en la ficha de la planta.
-ALERTAS = {"ndvi": ("<", 0.50), "psi": ("<", -1.30)}
+# Los criterios de alerta se configuran por vina.
 
 # Variación estacional de ejemplo (solo para generar datos falsos), una por fecha.
 ESTACIONAL = {
@@ -139,6 +145,26 @@ ESTACIONAL = {
 
 # Fondos de mapa. El satélite necesita internet (teselas de Esri; revisa sus términos de uso).
 FONDOS = {
+    "Neutro": dict(style="white-bg", layers=[dict(
+        sourcetype="geojson",
+        source={
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [-179.99, -85],
+                    [179.99, -85],
+                    [179.99, 85],
+                    [-179.99, 85],
+                    [-179.99, -85]
+                ]]
+            },
+            "properties": {}
+        },
+        type="fill",
+        color="#F3F4F0",
+        below="traces"
+    )]),
     "Satélite": dict(style="white-bg", layers=[dict(
         below="traces", sourcetype="raster", sourceattribution="Esri, Maxar, Earthstar Geographics",
         source=["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
@@ -424,7 +450,7 @@ if st.session_state["usuario"] is None:
     div[data-testid="stRadio"] input {
         accent-color: #322345;
     }
-
+    
     div[data-testid="stRadio"] {
         display: flex !important;
         justify-content: center !important;
@@ -839,7 +865,7 @@ if usuario_actual["rol"] == "investigador":
 VINA_ID_ACTUAL = usuario_actual["vina_id"]
 NOMBRE_USUARIO = usuario_actual["nombre"]
 
-vina_actual = consultar_vina(VINA_ID_ACTUAL)
+vina_actual = consultar_vina(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
 if vina_actual is not None:
     NOMBRE_VINA = vina_actual[1]
@@ -897,7 +923,7 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-
+    
     if usuario_actual["rol"] == "administrador":
 
         from vista_previa_csv import preparar_vista_previa_csv
@@ -1035,21 +1061,19 @@ with st.sidebar:
                 )
 
     # Si no hay CSV, recuperar solamente los datos de esta viña
-    datos = consultar_datos(VINA_ID_ACTUAL)
+    datos = consultar_datos(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
     if seccion_actual == "Mapa y monitoreo de plantas":
 
         st.header("Mapa")
 
         fondo = st.radio(
-            "Fondo",
-            list(FONDOS)
+            "Fondo del mapa",
+            list(FONDOS),
+            horizontal=True
         )
 
-        busca = st.text_input(
-            "Buscar planta por ID",
-            placeholder="Ej: A-F05-P020"
-        ).strip()
+        busca = ""
 
     else:
         fondo = list(FONDOS)[0]
@@ -1252,7 +1276,7 @@ if seccion_actual == "FenologIA":
 # DATOS GEOGRÁFICOS DE LA VIÑA ACTUAL
 # =========================================================
 
-vina_actual = consultar_vina(VINA_ID_ACTUAL)
+vina_actual = consultar_vina(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
 if vina_actual is not None:
     nombre_vina_actual = vina_actual[1]
@@ -1308,7 +1332,7 @@ if mostrar_configuracion:
         # UBICACIÓN GEOGRÁFICA DE LA VIÑA
         # =========================================================
 
-        vina_actual = consultar_vina(VINA_ID_ACTUAL)
+        vina_actual = consultar_vina(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
         if vina_actual is not None:
 
@@ -1326,9 +1350,7 @@ if mostrar_configuracion:
 
             import math
 
-            detalle = consultar_ubicacion_detallada(
-                VINA_ID_ACTUAL
-            )
+            detalle = consultar_ubicacion_detallada(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
             prefijo = f"geo_{VINA_ID_ACTUAL}_"
 
@@ -1784,6 +1806,9 @@ if mostrar_configuracion:
         )
 
         with conectar() as conexion:
+            from database import verificar_permiso_mediciones
+            conexion.execute('BEGIN')
+            verificar_permiso_mediciones(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
             cuarteles_claro = [
                 fila[0]
                 for fila in conexion.execute("""
@@ -1807,12 +1832,12 @@ if mostrar_configuracion:
                 key=f"df283_cuartel_{VINA_ID_ACTUAL}"
             )
 
-            configuracion_actual = consultar_claro_monitoreado(
-                VINA_ID_ACTUAL,
-                cuartel_claro
-            )
+            configuracion_actual = consultar_claro_monitoreado(VINA_ID_ACTUAL, cuartel_claro, usuario_id=st.session_state['usuario']['usuario_id'])
 
             with conectar() as conexion:
+                from database import verificar_permiso_mediciones
+                conexion.execute('BEGIN')
+                verificar_permiso_mediciones(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
                 plantas_disponibles = conexion.execute("""
                     SELECT id, codigo_planta, fila,
                            numero_planta, variedad
@@ -2106,6 +2131,9 @@ if mostrar_configuracion:
                 from database import conectar
 
                 with conectar() as conexion:
+                    from database import verificar_administrador_vina
+                    conexion.execute('BEGIN')
+                    verificar_administrador_vina(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
                     usuarios_vina = conexion.execute("""
                         SELECT nombre, email, rol, activo,
                                fecha_registro
@@ -2158,6 +2186,10 @@ if seccion_actual == "Meteorología y precipitaciones":
         mostrar_pronostico_local
     )
 
+    from interfaz_comparacion_meteo import (
+        mostrar_comparacion_meteorologica
+    )
+
     if latitud_guardada is None or longitud_guardada is None:
 
         st.info(
@@ -2175,10 +2207,16 @@ if seccion_actual == "Meteorología y precipitaciones":
             "· Fuente: Open-Meteo"
         )
 
-        tab_actual, tab_historial, tab_pronostico = st.tabs([
+        (
+            tab_actual,
+            tab_historial,
+            tab_pronostico,
+            tab_comparacion
+        ) = st.tabs([
             "Condiciones actuales",
             "Historial meteorológico",
-            "Pronóstico meteorológico"
+            "Pronóstico meteorológico",
+            "Comparación meteorológica"
         ])
 
         with tab_actual:
@@ -2191,12 +2229,20 @@ if seccion_actual == "Meteorología y precipitaciones":
 
             mostrar_meteorologia_local(
                 VINA_ID_ACTUAL
-            )
+            , usuario_id=st.session_state["usuario"]["usuario_id"])
 
         with tab_pronostico:
 
             mostrar_pronostico_local(
                 lat_meteo, lon_meteo
+            )
+
+        with tab_comparacion:
+
+            mostrar_comparacion_meteorologica(
+                VINA_ID_ACTUAL,
+                lat_meteo,
+                lon_meteo
             )
 
         st.divider()
@@ -2214,9 +2260,7 @@ if seccion_actual == "Meteorología y precipitaciones":
 
 if seccion_actual == "Mapa y monitoreo de plantas":
 
-    plantas_registradas = consultar_plantas_registradas(
-        VINA_ID_ACTUAL
-    )
+    plantas_registradas = consultar_plantas_registradas(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
     estructura_mapa = preparar_estructura_mapa(
         plantas_registradas,
@@ -2303,9 +2347,7 @@ def ventana_csv_plantas():
 
             datos_csv = validar_csv_estructural(datos_csv)
 
-            existentes = consultar_plantas_registradas(
-                VINA_ID_ACTUAL
-            )
+            existentes = consultar_plantas_registradas(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
             mascara_existentes = datos_csv["id"].isin(
                 existentes["id"]
@@ -5094,6 +5136,9 @@ def ventana_xlsx_fenologia():
 
                     try:
                         with conectar() as conexion:
+                            from database import verificar_permiso_mediciones
+                            conexion.execute('BEGIN')
+                            verificar_permiso_mediciones(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
                             for _, registro in datos_xlsx.iterrows():
                                 codigo_planta = str(
                                     registro["id"]
@@ -5440,8 +5485,8 @@ if seccion_actual == "Mapa y monitoreo de plantas":
         fecha2 = None
         comparar = False
 
-        col_cuartel, col_variedad = st.columns(
-            2, gap="medium"
+        col_cuartel, col_variedad, col_planta = st.columns(
+            3, gap="medium"
         )
 
         with col_cuartel:
@@ -5461,6 +5506,59 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                 placeholder="Todas las variedades",
                 key=f"filtro_variedad_{VINA_ID_ACTUAL}"
             )
+
+        with col_planta:
+
+            clave_buscador = f"buscador_id_{VINA_ID_ACTUAL}"
+            clave_evento = f"ultimo_clic_mapa_{VINA_ID_ACTUAL}"
+
+            opciones_id = sorted(
+                estructura_mapa["id"].dropna().unique().tolist()
+            )
+
+            clics_actuales = [
+                p for p in (
+                    (st.session_state.get("mapa") or {})
+                    .get("selection", {})
+                    .get("points", [])
+                )
+                if p.get("customdata")
+            ]
+
+            evento_actual = tuple(
+                str(p["customdata"][0])
+                for p in clics_actuales
+            )
+
+            evento_anterior = st.session_state.get(
+                clave_evento, ()
+            )
+
+            if evento_actual != evento_anterior:
+
+                if (
+                    evento_actual
+                    and evento_actual[0] in opciones_id
+                ):
+                    st.session_state[clave_buscador] = (
+                        evento_actual[0]
+                    )
+
+                st.session_state[clave_evento] = evento_actual
+
+            if (
+                st.session_state.get(clave_buscador)
+                not in opciones_id
+            ):
+                st.session_state[clave_buscador] = None
+
+            busca = st.selectbox(
+                "Buscar planta por ID",
+                opciones_id,
+                index=None,
+                placeholder="Ej: A-F05-P020",
+                key=clave_buscador
+            ) or ""
 
         if modo_ultimo:
 
@@ -5577,6 +5675,16 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
             st.caption("Sin mediciones registradas.")
 
+        resaltar_claros = st.toggle(
+            "Resaltar claros monitoreados",
+            value=False,
+            key=f"resaltar_claros_{VINA_ID_ACTUAL}",
+            help=(
+                "Identifica las plantas asignadas al "
+                "claro monitoreado de cada cuartel."
+            )
+        )
+
     # ---- Todas las plantas registradas
     if modo_ultimo:
         act = preparar_ultimos_registros(
@@ -5624,30 +5732,33 @@ if seccion_actual == "Mapa y monitoreo de plantas":
     dentro = act.loc[visible]
     fuera = act.loc[~visible]
 
-    # ---- Planta seleccionada: clic en el mapa o búsqueda por ID
+    # ---- Plantas pertenecientes a claros monitoreados
+    plantas_claros_mapa = dentro.iloc[0:0].copy()
 
-    clics = [
-        p for p in (
-            (st.session_state.get("mapa") or {})
-            .get("selection", {})
-            .get("points", [])
-        )
-        if p.get("customdata")
-    ]
+    if resaltar_claros:
 
-    # Si se busca una planta por ID, guardar su selección
-    if busca in act.index:
-        st.session_state["planta_seleccionada"] = busca
+        ids_claros = set()
 
-    # Si se hace clic en otra planta del mapa, actualizar la selección
-    elif clics:
-        st.session_state["planta_seleccionada"] = clics[0]["customdata"][0]
+        for cuartel_mapa in dentro["cuartel"].dropna().unique():
 
-    # Recuperar la última planta seleccionada
-    pid = st.session_state.get("planta_seleccionada")
+            configuracion_claro = consultar_claro_monitoreado(VINA_ID_ACTUAL, cuartel_mapa, usuario_id=st.session_state['usuario']['usuario_id'])
 
-    if pid not in act.index:
-        pid = None
+            ids_claros.update(
+                str(planta[1])
+                for planta in configuracion_claro
+            )
+
+        plantas_claros_mapa = dentro.loc[
+            dentro["plant_internal_id"].astype(str).isin(
+                ids_claros
+            )
+        ].copy()
+
+    # ---- Seleccion sincronizada entre buscador y mapa
+
+    pid = busca if busca in act.index else None
+
+    st.session_state["planta_seleccionada"] = pid
 
     plant_internal_id = (
         act.loc[pid, "plant_internal_id"]
@@ -5692,6 +5803,40 @@ if seccion_actual == "Mapa y monitoreo de plantas":
             showlegend=False
         ))
 
+        # Visualizacion enfocada en claros monitoreados.
+        enfoque_claros = (
+            resaltar_claros
+            and not plantas_claros_mapa.empty
+        )
+
+        def opacidad_plantas(grupo, normal):
+
+            if not enfoque_claros:
+                return normal
+
+            return np.where(
+                grupo.index.isin(plantas_claros_mapa.index),
+                1.0,
+                0.12
+            ).tolist()
+
+        if resaltar_claros:
+
+            if enfoque_claros:
+
+                st.caption(
+                    f"Claros monitoreados: "
+                    f"{len(plantas_claros_mapa)} plantas "
+                    "resaltadas en la selección actual."
+                )
+
+            else:
+
+                st.caption(
+                    "No hay plantas de claros monitoreados "
+                    "en la selección actual."
+                )
+
         if not sin_valores.empty:
             fig.add_trace(go.Scattermap(
                 lat=sin_valores["lat_mapa"],
@@ -5711,7 +5856,7 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                 marker=dict(
                     size=7,
                     color="#92979e",
-                    opacity=.9
+                    opacity=opacidad_plantas(sin_valores, .9)
                 )
             ))
 
@@ -5734,7 +5879,7 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                 marker=dict(
                     size=7,
                     color=con_valores[columna_color],
-                    opacity=.95,
+                    opacity=opacidad_plantas(con_valores, .95),
                     colorscale="RdYlGn" if comparar else "Viridis",
                     cmid=0 if comparar else None,
                     showscale=True,
@@ -5752,32 +5897,114 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                 )
             ))
 
+        # Delimitacion visual de cada claro.
+        if enfoque_claros:
+
+            for cuartel_claro_mapa, grupo in (
+                plantas_claros_mapa.groupby("cuartel")
+            ):
+
+                coords = grupo[
+                    ["lat_mapa", "lon_mapa"]
+                ].apply(pd.to_numeric, errors="coerce")
+
+                coords = coords.loc[
+                    np.isfinite(coords).all(axis=1)
+                    & coords["lat_mapa"].between(-85, 85)
+                    & coords["lon_mapa"].between(-180, 180)
+                ]
+
+                if coords.empty:
+                    continue
+
+                margen_lat = 0.000005
+
+                margen_lon = margen_lat / max(
+                    np.cos(np.radians(coords["lat_mapa"].mean())),
+                    0.01
+                )
+
+                sur = coords["lat_mapa"].min() - margen_lat
+                norte = coords["lat_mapa"].max() + margen_lat
+
+                oeste = coords["lon_mapa"].min() - margen_lon
+                este = coords["lon_mapa"].max() + margen_lon
+
+                fig.add_trace(go.Scattermap(
+                    lat=[sur, sur, norte, norte, sur],
+                    lon=[oeste, este, este, oeste, oeste],
+                    mode="lines",
+                    line=dict(
+                        color="#F47721",
+                        width=2
+                    ),
+                    hoverinfo="skip",
+                    showlegend=False
+                ))
+
         if pid:
             s = act.loc[pid]
             fig.add_trace(go.Scattermap(lat=[s["lat_mapa"]], lon=[s["lon_mapa"]], mode="markers", hoverinfo="skip",
                                         marker=dict(size=17, color="white", opacity=.9), showlegend=False))
-        # Centrado seguro utilizando coordenadas válidas.
+        # Centrado automatico segun las plantas visibles.
         coordenadas_validas = act[
             ["lat_mapa", "lon_mapa"]
-        ].dropna()
+        ].apply(pd.to_numeric, errors="coerce")
 
-        planta_buscada = (
-            act.loc[busca]
-            if busca in act.index
-            else None
+        coordenadas_validas = coordenadas_validas.loc[
+            np.isfinite(coordenadas_validas).all(axis=1)
+            & coordenadas_validas["lat_mapa"].between(-85, 85)
+            & coordenadas_validas["lon_mapa"].between(-180, 180)
+        ]
+
+        coordenadas_visibles = coordenadas_validas.loc[
+            coordenadas_validas.index.isin(dentro.index)
+        ]
+
+        coordenadas_vista = (
+            coordenadas_visibles
+            if not coordenadas_visibles.empty
+            else coordenadas_validas
         )
 
-        if (
-            planta_buscada is not None
-            and pd.notna(planta_buscada["lat_mapa"])
-            and pd.notna(planta_buscada["lon_mapa"])
-        ):
-            centro = planta_buscada[
-                ["lat_mapa", "lon_mapa"]
-            ]
+        zoom_mapa = 17.6
 
-        elif not coordenadas_validas.empty:
-            centro = coordenadas_validas.mean()
+        if busca in coordenadas_validas.index:
+            centro = coordenadas_validas.loc[busca]
+            zoom_mapa = 19
+
+        elif not coordenadas_vista.empty:
+            limites_min = coordenadas_vista.min()
+            limites_max = coordenadas_vista.max()
+
+            centro = (limites_min + limites_max) / 2
+
+            amplitud_lat = (
+                limites_max["lat_mapa"]
+                - limites_min["lat_mapa"]
+            )
+
+            amplitud_lon = (
+                limites_max["lon_mapa"]
+                - limites_min["lon_mapa"]
+            )
+
+            escala_lat = max(
+                np.cos(np.radians(centro["lat_mapa"])),
+                0.01
+            )
+
+            extension = max(
+                amplitud_lon,
+                amplitud_lat / escala_lat,
+                0.00001
+            )
+
+            zoom_mapa = float(np.clip(
+                np.log2(360 * 480 / (512 * extension)),
+                2,
+                19.5
+            ))
 
         elif (
             latitud_guardada is not None
@@ -5789,8 +6016,6 @@ if seccion_actual == "Mapa y monitoreo de plantas":
             })
 
         else:
-            # Centro técnico de respaldo para el mapa vacío.
-            # No se asigna a ninguna planta ni se guarda.
             centro = pd.Series({
                 "lat_mapa": LAT0,
                 "lon_mapa": LON0,
@@ -5799,13 +6024,36 @@ if seccion_actual == "Mapa y monitoreo de plantas":
         if coordenadas_validas.empty:
             st.warning(
                 "No existen plantas con coordenadas disponibles "
-                "en el mapa. Si faltan coordenadas, registra la ubicación de la "
-                "viña para visualizar las posiciones provisionales."
+                "en el mapa. Si faltan coordenadas, registra la "
+                "ubicación de la viña para visualizar las "
+                "posiciones provisionales."
             )
+
+        revision_mapa = (
+            f"{VINA_ID_ACTUAL}|{busca}|"
+            f"{centro['lat_mapa']:.8f}|"
+            f"{centro['lon_mapa']:.8f}|"
+            f"{zoom_mapa:.4f}"
+        )
+
         F = FONDOS[fondo]
-        fig.update_layout(height=720, margin=dict(l=0, r=0, t=0, b=0), uirevision=busca or "fijo",
-                        map=dict(style=F["style"], layers=F["layers"], center=dict(lat=centro["lat_mapa"], lon=centro["lon_mapa"]),
-                                zoom=19 if busca in act.index else 17.6))
+
+        fig.update_layout(
+            height=720,
+            margin=dict(l=0, r=0, t=0, b=50),
+            uirevision=revision_mapa,
+            paper_bgcolor="#FFFFFF",
+            map=dict(
+                style=F["style"],
+                layers=F["layers"],
+                center=dict(
+                    lat=float(centro["lat_mapa"]),
+                    lon=float(centro["lon_mapa"])
+                ),
+                zoom=zoom_mapa
+            )
+        )
+
         st.plotly_chart(fig, key="mapa", on_select="rerun", selection_mode="points", width="stretch",
                         config={"scrollZoom": True, "displaylogo": False})
         # Información sobre ubicaciones provisionales.
@@ -5906,39 +6154,18 @@ if seccion_actual == "Mapa y monitoreo de plantas":
         )
 
     else:
-        alerta_por_planta = pd.Series(
-            False, index=medidas.index
+        criterios_monitoreo = preparar_criterios_alerta(
+            consultar_configuracion_indicadores(
+                usuario_actual["usuario_id"],
+                VINA_ID_ACTUAL
+            )
         )
 
-        evaluables = pd.Series(
-            False, index=medidas.index
+        alerta_por_planta, evaluables, _ = (
+            evaluar_indicadores_dataframe(
+                medidas, criterios_monitoreo
+            )
         )
-
-        for parametro_alerta, (operador, umbral) in ALERTAS.items():
-
-            if parametro_alerta not in medidas.columns:
-                continue
-
-            valores_alerta = pd.to_numeric(
-                medidas[parametro_alerta],
-                errors="coerce"
-            )
-
-            validos = (
-                valores_alerta.notna()
-                & np.isfinite(valores_alerta)
-            )
-
-            evaluables |= validos
-
-            if operador == "<":
-                alerta_por_planta |= (
-                    validos & (valores_alerta < umbral)
-                )
-            elif operador == ">":
-                alerta_por_planta |= (
-                    validos & (valores_alerta > umbral)
-                )
 
         total_evaluables = int(evaluables.sum())
         total_alertadas = int(alerta_por_planta.sum())
@@ -5971,6 +6198,13 @@ if seccion_actual == "Mapa y monitoreo de plantas":
             "Las alertas se calculan únicamente sobre plantas "
             "con valores válidos para los umbrales configurados."
         )
+
+        if total_evaluables == 0:
+            st.info(
+                "No hay indicadores evaluables. Revisa los "
+                "criterios en Mi viña o la disponibilidad "
+                "de mediciones."
+            )
 
         promedios = []
 
@@ -6084,30 +6318,25 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
             else:
 
-                alertas = []
-                parametros_evaluados = 0
-
-                for k, (op, u) in ALERTAS.items():
-
-                    if k not in params:
-                        continue
-
-                    valor = pd.to_numeric(
-                        s[k], errors="coerce"
+                criterios_ficha = preparar_criterios_alerta(
+                    consultar_configuracion_indicadores(
+                        usuario_actual["usuario_id"],
+                        VINA_ID_ACTUAL
                     )
+                )
 
-                    if pd.isna(valor) or not np.isfinite(valor):
-                        continue
+                resultado_alertas = evaluar_indicadores_planta(
+                    s, criterios_ficha
+                )
 
-                    parametros_evaluados += 1
+                parametros_evaluados = resultado_alertas["evaluados"]
 
-                    if (
-                        (op == "<" and valor < u)
-                        or (op == ">" and valor > u)
-                    ):
-                        alertas.append(
-                            f"{info(k)['nombre']} {op} {u}"
-                        )
+                alertas = [
+                    f"{info(a['parametro'])['nombre']}: "
+                    f"{a['valor']:.2f} "
+                    f"({a['operador']} {a['umbral']})"
+                    for a in resultado_alertas["alertas"]
+                ]
 
                 if alertas:
                     st.warning(
@@ -6116,7 +6345,13 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
                 elif parametros_evaluados == 0:
                     st.info(
-                        "Sin datos suficientes para evaluar alertas."
+                        "Sin criterios activos o mediciones suficientes para evaluar alertas."
+                    )
+
+                elif parametros_evaluados < resultado_alertas["activos"]:
+                    st.info(
+                        "Sin alertas en los indicadores evaluados. "
+                        "Hay indicadores activos sin mediciones válidas."
                     )
 
                 else:
@@ -6126,10 +6361,7 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
             ant = anterior.loc[pid] if comparar else None
 
-            plantas_claro_ficha = consultar_claro_monitoreado(
-                VINA_ID_ACTUAL,
-                s["cuartel"]
-            ) or []
+            plantas_claro_ficha = consultar_claro_monitoreado(VINA_ID_ACTUAL, s['cuartel'], usuario_id=st.session_state['usuario']['usuario_id']) or []
 
             pertenece_al_claro = any(
                 str(planta[1]) == str(plant_internal_id)
@@ -6451,6 +6683,9 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
                             else:
                                 with conectar() as conexion:
+                                    from database import verificar_permiso_mediciones
+                                    conexion.execute('BEGIN')
+                                    verificar_permiso_mediciones(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
                                     resultado = conexion.execute("""
                                     SELECT m.measurement_id
                                     FROM mediciones m
@@ -6522,10 +6757,7 @@ if seccion_actual == "Mapa y monitoreo de plantas":
 
                 from database import consultar_ambiente_fotografia
 
-                imagenes = consultar_imagenes_por_planta(
-                    plant_internal_id,
-                    VINA_ID_ACTUAL
-                )
+                imagenes = consultar_imagenes_por_planta(plant_internal_id, VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
                 # Fotografías del dispositivo disponibles
                 # desde el historial ambiental.
@@ -6612,18 +6844,13 @@ if seccion_actual == "Mapa y monitoreo de plantas":
                             if ruta is not None:
                                 st.image(str(ruta), width=400)
 
-                                mostrar_editor_fenologia(
-                                    ruta, image_id, VINA_ID_ACTUAL, "monitoreo"
-                                )
+                                mostrar_editor_fenologia(ruta, image_id, VINA_ID_ACTUAL, 'monitoreo', usuario_id=st.session_state['usuario']['usuario_id'])
 
                                 # HISTORIAL PERMANENTE DE ANÁLISIS
                                 st.divider()
                                 st.write("**📊 Historial de análisis de esta fotografía**")
 
-                                historial = consultar_analisis_por_imagen(
-                                    image_id,
-                                    VINA_ID_ACTUAL
-                                )
+                                historial = consultar_analisis_por_imagen(image_id, VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
                                 if historial:
 
@@ -6756,7 +6983,7 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
         f"Estado general de {NOMBRE_VINA}"
     )
 
-    datos_resumen = consultar_datos(VINA_ID_ACTUAL)
+    datos_resumen = consultar_datos(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
     if datos_resumen.empty:
 
@@ -6784,7 +7011,7 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
         fecha_mas_antigua = datos_actuales["fecha"].min()
 
         plantas_registradas_resumen = (
-            consultar_plantas_registradas(VINA_ID_ACTUAL)
+            consultar_plantas_registradas(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
         )
 
         total_registradas = len(plantas_registradas_resumen)
@@ -6815,40 +7042,42 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
             "Diagnóstico basado en la última medición de cada planta."
         )
 
+        criterios_diagnostico = preparar_criterios_alerta(
+            consultar_configuracion_indicadores(
+                usuario_actual["usuario_id"],
+                VINA_ID_ACTUAL
+            )
+        )
+
+        _, evaluables_diagnostico, resultados_alertas = (
+            evaluar_indicadores_dataframe(
+                datos_actuales, criterios_diagnostico
+            )
+        )
+
+        total_evaluables_diagnostico = int(
+            evaluables_diagnostico.sum()
+        )
+
         alertas_detectadas = []
 
-        for parametro, (operador, umbral) in ALERTAS.items():
+        for planta, resultado in zip(
+            datos_actuales.to_dict("records"),
+            resultados_alertas
+        ):
 
-            if parametro not in datos_actuales.columns:
-                continue
-
-            valores = pd.to_numeric(
-                datos_actuales[parametro],
-                errors="coerce"
-            )
-
-            if operador == "<":
-                condicion = valores < umbral
-            elif operador == ">":
-                condicion = valores > umbral
-            else:
-                continue
-
-            plantas_alertadas = datos_actuales[
-                condicion.fillna(False)
-            ]
-
-            for _, planta in plantas_alertadas.iterrows():
+            for alerta in resultado["alertas"]:
 
                 alertas_detectadas.append({
                     "Código de planta": planta["id"],
                     "Cuartel": planta.get("cuartel"),
                     "Variedad": planta.get("variedad"),
-                    "Parámetro": info(parametro)["nombre"],
-                    "Valor registrado": valores.loc[
-                        planta.name
-                    ],
-                    "Umbral": f"{operador} {umbral}"
+                    "Parámetro": info(alerta["parametro"])["nombre"],
+                    "Valor registrado": alerta["valor"],
+                    "Umbral": (
+                        f"{alerta['operador']} "
+                        f"{alerta['umbral']}"
+                    )
                 })
 
         total_plantas_alertadas = (
@@ -6884,13 +7113,28 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
                 st.metric(
                     "Plantas con alertas",
                     f"{total_plantas_alertadas:,}".replace(",", ".")
+                    if total_evaluables_diagnostico
+                    else "No evaluable"
                 )
 
         st.divider()
 
         st.subheader("Alertas por cuartel")
 
-        if alertas_detectadas:
+        st.caption(
+            f"Plantas evaluables: {total_evaluables_diagnostico} "
+            f"de {total_plantas} plantas monitoreadas."
+        )
+
+        if total_evaluables_diagnostico == 0:
+
+            st.info(
+                "No hay plantas evaluables. Configura los "
+                "criterios de alerta en Mi viña o incorpora "
+                "mediciones válidas."
+            )
+
+        elif alertas_detectadas:
 
             st.warning(
                 "Se detectaron valores fuera de los umbrales "
@@ -6912,6 +7156,26 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
                 .nunique()
                 .reset_index(name="Plantas medidas")
                 .rename(columns={"cuartel": "Cuartel"})
+            )
+
+            evaluables_cuartel = (
+                datos_actuales.loc[evaluables_diagnostico]
+                .groupby("cuartel")["id"]
+                .nunique()
+                .reset_index(name="Plantas evaluables")
+                .rename(columns={"cuartel": "Cuartel"})
+            )
+
+            resumen_cuarteles = resumen_cuarteles.merge(
+                evaluables_cuartel,
+                on="Cuartel",
+                how="left"
+            )
+
+            resumen_cuarteles["Plantas evaluables"] = (
+                resumen_cuarteles["Plantas evaluables"]
+                .fillna(0)
+                .astype(int)
             )
 
             plantas_alertadas_cuartel = (
@@ -6936,7 +7200,7 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
 
             resumen_cuarteles["% con alertas"] = (
                 resumen_cuarteles["Plantas con alertas"]
-                / resumen_cuarteles["Plantas medidas"]
+                / resumen_cuarteles["Plantas evaluables"].replace(0, np.nan)
                 * 100
             ).round(1)
 
@@ -6950,7 +7214,7 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
                 column_config={
                     "% con alertas": st.column_config.ProgressColumn(
                         "% con alertas",
-                        help="Porcentaje de plantas con al menos una alerta en el cuartel.",
+                        help="Porcentaje de plantas evaluables con al menos una alerta.",
                         format="%.1f %%",
                         min_value=0,
                         max_value=100
@@ -6975,8 +7239,8 @@ if seccion_actual == "Resumen y diagnóstico inteligente":
         else:
 
             st.success(
-                "No se detectaron valores fuera de los umbrales "
-                "configurados en la última medición."
+                "No se detectaron alertas en los indicadores evaluados "
+                "de las últimas mediciones disponibles."
             )
 
 
@@ -7262,13 +7526,14 @@ if seccion_actual == "Fotografías y análisis IA":
         key=f"df29_modo_{VINA_ID_ACTUAL}"
     )
 
-    imagenes = consultar_todas_las_imagenes(
-        VINA_ID_ACTUAL
-    )
+    imagenes = consultar_todas_las_imagenes(VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
     if modo_galeria == "Claro monitoreado":
 
         with conectar() as conexion:
+            from database import verificar_permiso_mediciones
+            conexion.execute('BEGIN')
+            verificar_permiso_mediciones(conexion, st.session_state['usuario']['usuario_id'], VINA_ID_ACTUAL)
             cuarteles_galeria = [
                 fila[0]
                 for fila in conexion.execute(
@@ -7291,10 +7556,7 @@ if seccion_actual == "Fotografías y análisis IA":
                 key=f"df29_cuartel_{VINA_ID_ACTUAL}"
             )
 
-            plantas_claro = consultar_claro_monitoreado(
-                VINA_ID_ACTUAL,
-                cuartel_galeria
-            )
+            plantas_claro = consultar_claro_monitoreado(VINA_ID_ACTUAL, cuartel_galeria, usuario_id=st.session_state['usuario']['usuario_id'])
 
             if plantas_claro:
 
@@ -7579,14 +7841,9 @@ if seccion_actual == "Fotografías y análisis IA":
 
                             st.image(str(ruta), width=500)
 
-                            mostrar_editor_fenologia(
-                                ruta, image_id, VINA_ID_ACTUAL, "galeria"
-                            )
+                            mostrar_editor_fenologia(ruta, image_id, VINA_ID_ACTUAL, 'galeria', usuario_id=st.session_state['usuario']['usuario_id'])
 
-                            historial = consultar_analisis_por_imagen(
-                                image_id,
-                                VINA_ID_ACTUAL
-                            )
+                            historial = consultar_analisis_por_imagen(image_id, VINA_ID_ACTUAL, usuario_id=st.session_state['usuario']['usuario_id'])
 
                             if historial:
 

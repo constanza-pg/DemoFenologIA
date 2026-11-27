@@ -1,53 +1,52 @@
-# Sistema operativo
-.DS_Store
-
-# Python
-__pycache__/
-*.py[cod]
+# Entorno Python
 .venv/
 venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Credenciales y configuracion privada
 .env
 .env.*
-
-# Credenciales
+!.env.example
 .streamlit/secrets.toml
 *.pem
 *.key
 
-# Bases de datos y datos locales
+# Bases de datos y datos privados
 data/
 *.db
 *.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 
-# Modelos y resultados
-*.pt
-*.onnx
-runs/
-modelos/
-logs/
-
-# Respaldos y pruebas
+# Respaldos y registros
 respaldos/
-*_antes_*
-*_respaldo*
-*_zip_prueba.py
+logs/
+*.log
 
-# Editores
-.vscode/
-.idea/
+# Modelos y entrenamiento
+*.pt
+*.pth
+*.onnx
+weights/
+runs/
+dataset_racimos/
+evaluacion_modelos/
 
-# Recursos audiovisuales locales
-tutoriales/
-*.mov
-*.mp4
+# Archivos de pruebas
+probar_login.py
+probar_yolo.py
 
-# Importaciones y exportaciones locales
+# Archivos de datos y multimedia
 *.zip
 *.xlsx
 *.csv
+*.mov
+*.mp4
 
-# Archivos auxiliares de SQLite
-*.sqlite-*
-*.sqlite3-*
+# Archivos del sistema
+.DS_Store

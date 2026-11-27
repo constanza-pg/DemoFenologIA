@@ -1,6 +1,5 @@
 
-import io
-from datos_demo_investigacion import generar_datos_demo
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -80,21 +79,27 @@ def mostrar_filtros(datos, prefijo):
 
 def mostrar_aviso_privacidad():
 
-    if st.session_state.get("modo_demo_investigacion", False):
+    st.caption(
+        "Repositorio de información vitivinícola agregada. "
+        "Solo podrán publicarse datos de viñedos autorizados "
+        "con procedencia validada."
+    )
 
-        st.caption(
-            "Los datos de demostración son completamente "
-            "sintéticos y no representan viñedos reales."
-        )
+    st.caption(
+        f"Cada grupo requiere al menos {MIN_VINAS} "
+        f"viñedos y {MIN_PLANTAS} plantas."
+    )
 
-    else:
+    st.caption(
+        "Los resultados corresponden a promedios "
+        "equilibrados por viñedo. Los datos de prueba "
+        "no forman parte del repositorio."
+    )
 
-        st.info(
-            "El repositorio real requiere autorización "
-            "de los viñedos y validación de procedencia. "
-            f"Cada grupo requiere al menos {MIN_VINAS} "
-            f"viñedos y {MIN_PLANTAS} plantas."
-        )
+    st.caption(
+        "Los resultados de inteligencia artificial "
+        "corresponden a estimaciones experimentales."
+    )
 
 
 def mostrar_inicio(datos):
@@ -307,8 +312,8 @@ def mostrar_comparativas(datos):
         )
 
         st.caption(
-            "Valores simulados con fines de demostración. "
-            "No constituyen evidencia científica."
+            "Valores agrupados por región, variedad y período. "
+            "Interpretar considerando la cobertura de los datos."
         )
 
 
@@ -428,8 +433,8 @@ def mostrar_meteorologia(datos):
                 )
 
                 st.caption(
-                    "Relaciones ilustrativas entre datos "
-                    "simulados. No permiten establecer "
+                    "Relaciones estadísticas entre datos "
+                    "agrupados. No permiten establecer "
                     "causalidad ni conclusiones agronómicas."
                 )
 
@@ -440,7 +445,8 @@ def mostrar_descargas(datos):
     st.title("Descargas de investigación")
 
     st.caption(
-        "Selecciona la información que deseas exportar."
+        "Exportación de información técnica agrupada "
+        "para investigaciones vitivinícolas."
     )
 
     with st.container(border=True):
@@ -449,113 +455,39 @@ def mostrar_descargas(datos):
             datos, "descargas"
         )
 
-        variables = st.multiselect(
+        st.multiselect(
             "Variables para exportar",
             list(VARIABLES),
             default=list(VARIABLES),
             format_func=lambda v: VARIABLES[v]
         )
 
-        if filtrados.empty:
-
-            st.info(
-                "No hay datos disponibles para exportar."
-            )
-
-            return
-
-        if not filtrados["Origen"].eq("SIMULADO").all():
-
-            st.error(
-                "La exportación de datos reales "
-                "todavía no está habilitada."
-            )
-
-            return
-
-        columnas = [
-            "Region", "Variedad",
-            "Temporada", "Periodo",
-            "Mediciones", *variables, "Origen"
-        ]
-
-        tabla = filtrados[columnas].copy()
-
         st.metric(
-            "Grupos seleccionados",
-            len(tabla)
+            "Grupos disponibles",
+            len(filtrados)
         )
 
-        st.dataframe(
-            tabla.head(10),
-            hide_index=True,
-            width="stretch"
+        st.info(
+            "Las descargas estarán disponibles cuando "
+            "existan datos autorizados y se complete "
+            "la validación del repositorio."
         )
-
-        csv = tabla.to_csv(
-            index=False
-        ).encode("utf-8-sig")
-
-        excel = io.BytesIO()
-
-        with pd.ExcelWriter(
-            excel,
-            engine="openpyxl"
-        ) as escritor:
-
-            tabla.to_excel(
-                escritor,
-                sheet_name="Datos simulados",
-                index=False
-            )
-
-            pd.DataFrame({
-                "Información": [
-                    "FenologIA",
-                    "DATOS COMPLETAMENTE SIMULADOS",
-                    "Uso exclusivo de demostración",
-                    "No utilizar como evidencia científica",
-                    "No representan viñedos reales"
-                ]
-            }).to_excel(
-                escritor,
-                sheet_name="Metadatos",
-                index=False
-            )
 
         col_csv, col_excel = st.columns(2)
 
         with col_csv:
-
-            st.download_button(
+            st.button(
                 "Descargar CSV",
-                data=csv,
-                file_name="FenologIA_DATOS_SIMULADOS.csv",
-                mime="text/csv",
-                icon=":material/download:",
-                type="primary",
+                disabled=True,
                 width="stretch"
             )
 
         with col_excel:
-
-            st.download_button(
+            st.button(
                 "Descargar Excel",
-                data=excel.getvalue(),
-                file_name="FenologIA_DATOS_SIMULADOS.xlsx",
-                mime=(
-                    "application/vnd.openxmlformats-"
-                    "officedocument.spreadsheetml.sheet"
-                ),
-                icon=":material/download:",
-                type="primary",
+                disabled=True,
                 width="stretch"
             )
-
-        st.warning(
-            "Los archivos contienen datos sintéticos "
-            "y no deben utilizarse como resultados científicos."
-        )
 
 
 def mostrar_perfil(usuario):
@@ -633,38 +565,32 @@ def mostrar_interfaz_investigacion(usuario):
     )
 
 
-    modo_demo = st.toggle(
-        "Modo demostración",
-        value=True,
-        key="modo_demo_investigacion"
+    st.session_state.pop(
+        "modo_demo_investigacion", None
     )
 
-    if modo_demo:
+    try:
 
-        st.warning(
-            "Modo demostración — Datos completamente "
-            "simulados. No representan mediciones reales."
+        datos = consultar_datos_investigacion(
+            usuario["usuario_id"]
         )
 
-        datos = generar_datos_demo()
+    except PermissionError:
 
-    else:
-
-        st.info(
-            "Repositorio real: publicación temporalmente "
-            "deshabilitada hasta completar la validación "
-            "de procedencia y privacidad."
+        st.error(
+            "No tienes acceso al repositorio de investigacion."
         )
 
-        datos = pd.DataFrame(columns=[
-            "Region",
-            "Variedad",
-            "Periodo",
-            "Temporada",
-            "Mediciones",
-            *VARIABLES.keys(),
-            "Origen"
-        ])
+        return
+
+    except Exception:
+
+        st.error(
+            "No fue posible consultar el repositorio. "
+            "Intenta nuevamente mas tarde."
+        )
+
+        return
 
     if actual == "Inicio":
         mostrar_inicio(datos)
@@ -683,3 +609,4 @@ def mostrar_interfaz_investigacion(usuario):
 
     elif actual == "Mi perfil":
         mostrar_perfil(usuario)
+

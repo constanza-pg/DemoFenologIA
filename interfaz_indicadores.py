@@ -84,11 +84,19 @@ def mostrar_configuracion_indicadores(usuario, vina_id):
         "Deja vacío un límite si no deseas establecerlo."
     )
 
-    st.info(
-        "Los criterios guardados todavía no se aplican "
-        "a Diagnóstico y Monitoreo. "
-        "La integración se encuentra en preparación."
+    st.caption(
+        "Los criterios guardados se aplican a Diagnóstico, "
+        "Monitoreo y la ficha individual de cada planta. "
+        "Los criterios por variedad tienen prioridad sobre "
+        "los generales, incluso si están desactivados."
     )
+
+    if not configuraciones:
+        st.info(
+            "Todavía no hay criterios configurados. "
+            "El administrador debe activar algún indicador "
+            "para comenzar a evaluar alertas."
+        )
 
     for parametro, (nombre, unidad) in INDICADORES_UI.items():
 

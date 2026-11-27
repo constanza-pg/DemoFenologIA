@@ -154,7 +154,7 @@ def mostrar_resultados_fenologia(datos, clave):
 
 
 def mostrar_editor_fenologia(
-    ruta, image_id, vina_id, origen
+    ruta, image_id, vina_id, origen, *, usuario_id
 ):
 
     usuario = st.session_state.get("usuario", {})
@@ -493,28 +493,7 @@ def mostrar_editor_fenologia(
             datos["cajas"] = estado["cajas"]
             datos["revision_usuario"] = True
 
-            guardar_analisis_imagen(
-                image_id=image_id,
-                modelo=MODELO,
-                version_modelo=VERSION,
-                cantidad_racimos=datos[
-                    "cantidad_racimos"
-                ],
-                porcentaje_verde=datos[
-                    "colores"
-                ]["verde"],
-                porcentaje_envero=None,
-                porcentaje_morado=datos[
-                    "porcentaje_morado_total"
-                ],
-                etapa_fenologica=None,
-                confianza=None,
-                resultado_json=json.dumps(
-                    datos,
-                    ensure_ascii=False
-                ),
-                vina_id=vina_id
-            )
+            guardar_analisis_imagen(image_id=image_id, modelo=MODELO, version_modelo=VERSION, cantidad_racimos=datos['cantidad_racimos'], porcentaje_verde=datos['colores']['verde'], porcentaje_envero=None, porcentaje_morado=datos['porcentaje_morado_total'], etapa_fenologica=None, confianza=None, resultado_json=json.dumps(datos, ensure_ascii=False), vina_id=vina_id, usuario_id=usuario_id)
 
             estado["guardado"] = True
 

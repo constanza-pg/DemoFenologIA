@@ -186,3 +186,106 @@ def guardar_configuracion_indicador(
                 int(bool(alerta_activa)),
                 usuario_id
             ))
+
+
+def preparar_criterios_alerta(configuraciones):
+    return {
+        (c["parametro"], c["variedad"]): c
+        for c in configuraciones
+        if not c.get("etapa_fenologica")
+    }
+
+
+def evaluar_indicadores_planta(planta, criterios):
+
+    variedad_original = planta.get("variedad")
+
+    variedad = (
+        str(variedad_original).strip()
+        if variedad_original is not None
+        else ""
+    )
+
+    alertas = []
+    evaluados = 0
+    activos = 0
+
+    for parametro in INDICADORES:
+
+        criterio = criterios.get(
+            (parametro, variedad)
+        )
+
+        if criterio is None:
+            criterio = criterios.get(
+                (parametro, "")
+            )
+
+        if not criterio or not criterio.get("alerta_activa"):
+            continue
+
+        minimo = criterio.get("valor_minimo")
+        maximo = criterio.get("valor_maximo")
+
+        if minimo is None and maximo is None:
+            continue
+
+        activos += 1
+
+        try:
+            valor = float(planta.get(parametro))
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+        if not math.isfinite(valor):
+            continue
+
+        evaluados += 1
+
+        if minimo is not None and valor < minimo:
+
+            alertas.append({
+                "parametro": parametro,
+                "valor": valor,
+                "operador": "<",
+                "umbral": minimo
+            })
+
+        elif maximo is not None and valor > maximo:
+
+            alertas.append({
+                "parametro": parametro,
+                "valor": valor,
+                "operador": ">",
+                "umbral": maximo
+            })
+
+    return {
+        "alertas": alertas,
+        "evaluados": evaluados,
+        "activos": activos
+    }
+
+
+def evaluar_indicadores_dataframe(datos, criterios):
+
+    import pandas as pd
+
+    resultados = [
+        evaluar_indicadores_planta(planta, criterios)
+        for planta in datos.to_dict("records")
+    ]
+
+    alertadas = pd.Series(
+        [bool(r["alertas"]) for r in resultados],
+        index=datos.index,
+        dtype=bool
+    )
+
+    evaluables = pd.Series(
+        [r["evaluados"] > 0 for r in resultados],
+        index=datos.index,
+        dtype=bool
+    )
+
+    return alertadas, evaluables, resultados

@@ -81,12 +81,16 @@ def obtener_historial_local(latitud, longitud, dias=90):
     return df
 
 
-def mostrar_meteorologia_local(vina_id):
+def mostrar_meteorologia_local(vina_id, *, usuario_id):
 
     import database
     import plotly.express as px
 
     with database.conectar() as con:
+        con.execute("BEGIN")
+        database.verificar_permiso_mediciones(
+            con, usuario_id, vina_id
+        )
         ubicacion = con.execute("""
             SELECT latitud, longitud
             FROM vinas
@@ -288,45 +292,6 @@ def mostrar_meteorologia_local(vina_id):
         )
 
 
-def actualizar_lluvia_cercana(vina_id):
-    import database
-    from dmc import obtener_informe_precipitacion
-
-    hoy = datetime.now(ZoneInfo("America/Santiago")).date()
-
-    estaciones = [
-        e for e in database.consultar_estaciones_cercanas(vina_id)
-        if e["fuente_datos"] == "DMC"
-    ]
-
-    for estacion in estaciones[:5]:
-
-        codigo = estacion["estacion_id"].split("_", 1)[-1]
-
-        for dias_atras in (0, 1):
-            fecha = hoy - timedelta(days=dias_atras)
-
-            try:
-                informe = obtener_informe_precipitacion(
-                    codigo, fecha.strftime("%d-%m-%Y")
-                )
-            except (ValueError, requests.RequestException):
-                continue
-
-            if not any(
-                r["estado"] == "numerico"
-                and r["valor_mm"] is not None
-                for r in informe["precipitacion_horaria"]
-            ):
-                continue
-
-            database.guardar_informe_dmc_precipitacion(
-                informe, estacion["estacion_id"]
-            )
-
-            return estacion["nombre"]
-
-    return None
 
 
 # ==========================================================
@@ -663,3 +628,143 @@ def mostrar_pronostico_local(latitud, longitud):
         st.warning(
             f"No se pudo obtener el pronóstico: {e}"
         )
+
+
+
+# ==========================================================
+# COMPARACION METEOROLOGICA POR FECHAS
+# ==========================================================
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def obtener_meteorologia_por_fechas(
+    latitud,
+    longitud,
+    fecha_inicio,
+    fecha_fin
+):
+
+    import math
+
+    latitud = float(latitud)
+    longitud = float(longitud)
+
+    if not (
+        math.isfinite(latitud)
+        and math.isfinite(longitud)
+        and -90 <= latitud <= 90
+        and -180 <= longitud <= 180
+    ):
+        raise ValueError("Coordenadas invalidas.")
+
+    inicio = pd.Timestamp(fecha_inicio).date()
+    fin = pd.Timestamp(fecha_fin).date()
+
+    hoy = datetime.now(
+        ZoneInfo("America/Santiago")
+    ).date()
+
+    ultima_fecha = hoy - timedelta(days=7)
+
+    if inicio > fin:
+        raise ValueError(
+            "La fecha inicial debe ser anterior o igual a la final."
+        )
+
+    if fin > ultima_fecha:
+        raise ValueError(
+            "La fecha seleccionada supera el limite historico."
+        )
+
+    cantidad_dias = (fin - inicio).days + 1
+
+    if cantidad_dias > 366:
+        raise ValueError(
+            "Cada periodo puede tener hasta 366 dias."
+        )
+
+    variables = {
+        "temperature_2m_min": "temperatura_min",
+        "temperature_2m_max": "temperatura_max",
+        "relative_humidity_2m_mean": "humedad_relativa",
+        "precipitation_sum": "precipitacion",
+        "shortwave_radiation_sum": "radiacion_solar",
+        "wind_speed_10m_mean": "velocidad_viento"
+    }
+
+    respuesta = requests.get(
+        "https://archive-api.open-meteo.com/v1/archive",
+        params={
+            "latitude": latitud,
+            "longitude": longitud,
+            "start_date": inicio.isoformat(),
+            "end_date": fin.isoformat(),
+            "daily": ",".join(variables),
+            "timezone": "auto",
+            "temperature_unit": "celsius",
+            "wind_speed_unit": "kmh",
+            "precipitation_unit": "mm"
+        },
+        timeout=25,
+        verify=certifi.where()
+    )
+
+    respuesta.raise_for_status()
+
+    datos = respuesta.json()
+
+    if datos.get("error") or not datos.get("daily"):
+        raise ValueError(
+            "No se recibieron datos meteorologicos."
+        )
+
+    df = pd.DataFrame(datos["daily"])
+
+    df = df.rename(
+        columns={"time": "fecha", **variables}
+    )
+
+    df["fecha"] = pd.to_datetime(
+        df["fecha"], errors="coerce"
+    ).dt.normalize()
+
+    df = (
+        df.dropna(subset=["fecha"])
+        .drop_duplicates("fecha")
+        .set_index("fecha")
+        .sort_index()
+    )
+
+    for variable in variables.values():
+
+        if variable not in df.columns:
+            df[variable] = float("nan")
+
+        df[variable] = pd.to_numeric(
+            df[variable],
+            errors="coerce"
+        ).replace(
+            [float("inf"), float("-inf")],
+            float("nan")
+        )
+
+    # Conservar todos los dias solicitados,
+    # incluso aquellos sin informacion.
+    calendario = pd.date_range(
+        inicio,
+        fin,
+        freq="D",
+        name="fecha"
+    )
+
+    df = df.reindex(calendario)
+
+    if not df[
+        list(variables.values())
+    ].notna().any().any():
+
+        raise ValueError(
+            "No existen datos para el periodo seleccionado."
+        )
+
+    return df.reset_index()
+

@@ -229,9 +229,3 @@ def analizar_racimos_yolo(ruta_imagen, confianza=0.25):
     }
 
 
-def analizar_uvas_roboflow(ruta_imagen, confianza=0.20):
-    """Analizador anterior conservado como referencia."""
-    raise RuntimeError(
-        "Roboflow fue reemplazado por FenologIA - SAM 2. "
-        "Los analisis historicos se mantienen disponibles."
-    )

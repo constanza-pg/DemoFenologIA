@@ -91,13 +91,17 @@ database.actualizar_esquema_claros()
 database.actualizar_esquema_capturas_dispositivo()
 database.actualizar_esquema_imagenes_dispositivo()
 database.actualizar_vista_imagenes_origen()
+database.actualizar_esquema_procedencia()
+database.actualizar_esquema_entorno_vinas()
+database.inicializar_procedencia_automatica()
+
 
 usuario_id = str(uuid.uuid4())
 
 with database.conectar() as conexion:
     conexion.execute("""
         UPDATE vinas
-        SET nombre = ?, ubicacion = ?,
+        SET entorno = 'prueba', nombre = ?, ubicacion = ?,
             latitud = ?, longitud = ?
         WHERE id = ?
     """, (
@@ -127,7 +131,7 @@ plantas = database.guardar_plantas(
 )
 
 mediciones = database.guardar_mediciones(
-    datos, "VINA001"
+    datos, "VINA001", procedencia="prueba"
 )
 
 database.registrar_dispositivos_iniciales()

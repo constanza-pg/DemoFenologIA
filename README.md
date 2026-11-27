@@ -1,198 +1,259 @@
-# FenologIA
+# FenologIA v1.0
 
-### Plataforma inteligente de monitoreo e investigación vitivinícola
+Plataforma de monitoreo vitícola, seguimiento fenológico,
+gestión de información agronómica y análisis experimental
+de fotografías mediante inteligencia artificial.
 
-FenologIA es un prototipo académico orientado al monitoreo
-individual de plantas, la visualización geoespacial y el
-análisis de información vitícola mediante inteligencia artificial.
+## 1. Objetivo
 
-## Objetivo
+Centralizar la información de cada viñedo, facilitando
+el seguimiento individual de plantas, la interpretación
+de indicadores agronómicos y la comparación temporal
+de mediciones, fotografías y condiciones ambientales.
 
-Centralizar información vitícola, ambiental y fotográfica
-para facilitar el seguimiento de los viñedos y apoyar
-la toma de decisiones.
-
-## Perfiles de acceso
-
-### Gestión vitícola
-
-- Administración independiente de cada viña.
-- Gestión de usuarios y permisos.
-- Registro de plantas y estructura del viñedo.
-- Consulta e incorporación de mediciones.
-- Monitoreo individual e histórico.
-
-### Investigación vitivinícola
-
-- Registro y aprobación de investigadores.
-- Exploración de información agrupada.
-- Filtros por región, variedad y período.
-- Comparación de indicadores.
-- Exportación de datos sintéticos en CSV y XLSX.
-- Autorizaciones de participación de viñas.
-
-El perfil investigador utiliza actualmente datos sintéticos.
-El acceso a información real requiere validaciones adicionales
-de privacidad y seguridad.
-
-## Funcionalidades de la plataforma
+## 2. Funcionalidades
 
 ### Inicio
-
-- Accesos rápidos a las herramientas.
-- Centro de ayuda, presentación y videotutoriales.
+- Presentación de FenologIA.
+- Acceso a recursos de aprendizaje y tutoriales.
 
 ### Diagnóstico
+- Resumen del estado del viñedo.
+- Indicadores agronómicos configurables.
+- Alertas según umbrales definidos por el administrador.
+- Comparación por cuartel y variedad.
+- Identificación de plantas con indicadores fuera de rango.
+- Diferenciación entre indicadores evaluados y no evaluables.
 
-- Resumen de indicadores vitícolas.
-- Identificación de alertas por planta.
-- Gráficos y contexto meteorológico.
-- Apoyo a la toma de decisiones.
-
-### Mapa y monitoreo
-
-- Mapa interactivo de plantas y cuarteles.
-- Filtros por fecha, variedad y cuartel.
-- Consulta individual e histórica de plantas.
-- Fotografías asociadas.
-- Importación de mediciones mediante XLSX.
+### Monitoreo
+- Visualización geográfica de cuarteles y plantas.
+- Filtros por cuartel, variedad e identificador.
+- Consulta individual e histórica de mediciones.
+- Visualización del claro monitoreado.
+- Consulta de fotografías asociadas a las plantas.
+- Carga de mediciones mediante archivos XLSX.
+- Importación de capturas del dispositivo mediante ZIP.
 
 ### Meteorología
-
 - Integración con Open-Meteo.
 - Condiciones meteorológicas actuales.
-- Historial y pronóstico meteorológico.
-- Información referencial según coordenadas.
+- Pronóstico meteorológico.
+- Historial de temperatura, humedad, precipitación,
+  radiación solar y viento.
+- Comparación entre periodos meteorológicos.
 
-### Fotografías e inteligencia artificial
+La información de Open-Meteo corresponde a estimaciones
+meteorológicas de referencia. No sustituye las mediciones
+directas realizadas por el dispositivo en el viñedo.
 
-- Galería fotográfica.
-- Detección asistida mediante YOLO-World.
-- Segmentación de racimos mediante SAM 2.
-- Selección y corrección manual de racimos.
-- Clasificación experimental de colores.
-- Historial de resultados.
+### Fotografías e IA
+- Galería de fotografías por viñedo y planta.
+- Consulta de fotografías del dispositivo.
+- Detección experimental de racimos mediante YOLO-World.
+- Selección y corrección manual de regiones de interés.
+- Segmentación mediante SAM 2.
+- Análisis de distribución de colores mediante HSV.
+- Registro e historial de resultados.
 
 ### Mi viña
-
-- Información general y ubicación geográfica.
-- Configuración del claro monitoreado.
-- Configuración de indicadores.
-- Plantillas de importación.
+- Configuración general del viñedo.
+- Registro de ubicación geográfica.
+- Gestión de estructura vitícola.
+- Configuración de claros monitoreados.
 - Administración de usuarios.
-- Autorizaciones de investigación.
+- Configuración de indicadores agronómicos.
+- Autorización para uso agregado de datos en investigación.
 
-La integración de los indicadores personalizados
-con el sistema de alertas se encuentra en desarrollo.
+## 3. Perfiles de usuario
 
-## Integración con dispositivos
+### Administrador
+Gestiona su propio viñedo, usuarios, estructura,
+mediciones, indicadores y autorizaciones.
 
-- Importación de archivos ZIP.
-- Validación de dispositivos y archivos.
-- Registro de temperatura y humedad ambiental.
-- Asociación de fotografías con plantas.
-- Historial de capturas.
-- Detección de registros duplicados.
+### Usuario
+Consulta la información de su viñedo y utiliza
+las funciones de monitoreo y carga autorizadas.
+No puede registrar estructuras vitícolas ni administrar
+usuarios o modificar indicadores de alerta.
 
-## Tecnologías
+### Investigador
+Perfil independiente sujeto a aprobación.
+Dispone de una interfaz de consulta de información
+agregada para fines de investigación.
 
-- Python y Streamlit.
-- SQLite.
-- Pandas y NumPy.
-- Plotly y Folium.
-- Geopy y Open-Meteo.
-- OpenCV y Pillow.
-- PyTorch y Torchvision.
-- YOLO-World y SAM 2.
+La publicación y exportación de datos de investigación
+permanecen deshabilitadas en esta versión hasta completar
+la validación de privacidad correspondiente.
 
-## Instalación
+Los datos de prueba no forman parte del repositorio
+de investigación.
 
-Se recomienda utilizar Python 3.11 y Git.
+## 4. Arquitectura
 
-```bash
-git clone https://github.com/constanza-pg/DemoFenologIA.git
-cd DemoFenologIA
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
+FenologIA utiliza una arquitectura modular basada en:
 
-## Generar datos de demostración
+- Python y Streamlit para la aplicación web.
+- SQLite para almacenamiento persistente.
+- Pandas y NumPy para procesamiento de información.
+- Plotly para visualización de datos.
+- Folium para representación geográfica.
+- Open-Meteo para información meteorológica.
+- PyTorch, Ultralytics y OpenCV para análisis de imágenes.
+- OpenPyXL para procesamiento de archivos Excel.
 
-```bash
-python inicializar_demo.py
-```
+La plataforma separa la autenticación, el almacenamiento,
+la interfaz, el procesamiento de imágenes, la meteorología
+y la importación de datos en módulos especializados.
 
-El generador está diseñado para crear:
+## 5. Organización del proyecto
 
-- 10.920 plantas ficticias.
-- 65.520 mediciones sintéticas.
-- 4 cuarteles.
-- 6 fechas de monitoreo.
+    FenologIA_v1.0/
+    |
+    |-- app.py
+    |-- database.py
+    |-- autenticacion.py
+    |-- configuracion_indicadores.py
+    |-- meteorologia_local.py
+    |-- analizador.py
+    |-- analizador_fenologia.py
+    |-- interfaz_fenologia.py
+    |-- interfaz_investigacion.py
+    |-- investigacion.py
+    |-- importador_zip_dispositivo.py
+    |-- motor_importacion_zip_dispositivo.py
+    |-- gestionar_vinas.py
+    |-- gestionar_investigadores.py
+    |-- modulos/
+    |-- servicios/
+    |-- modelos/
+    |-- weights/
+    |-- data/
+    |-- tutoriales/
+    |-- requirements.txt
+    |-- README.md
 
-Usuario de demostración: demo@example.com
+Existen módulos adicionales de validación, visualización,
+procesamiento y vinculación de datos.
 
-La contraseña se establece localmente durante
-la inicialización.
+## 6. Instalación
 
-## Ejecutar FenologIA
+Se recomienda Python 3.11, Git y un entorno virtual.
 
-```bash
-python -m streamlit run app.py
-```
+En macOS:
 
-Abrir http://localhost:8501 en el navegador.
+    python3.11 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install --upgrade pip
+    python -m pip install -r requirements.txt
+    python -m pip check
 
-Las funciones meteorológicas, la geocodificación
-y los fondos cartográficos requieren internet.
+Los modelos de inteligencia artificial deben encontrarse
+en las rutas correspondientes:
 
-## Arquitectura del proyecto
+    modelos/sam2_t.pt
+    modelos/yolov8s-worldv2.pt
+    weights/clip/ViT-B-32.pt
 
-| Módulo | Responsabilidad |
-|---|---|
-| app.py | Interfaz principal |
-| database.py | Base de datos |
-| autenticacion.py | Autenticación y permisos |
-| estilos_fenologia.py | Diseño visual |
-| meteorologia_local.py | Integración Open-Meteo |
-| analizador_fenologia.py | Análisis de racimos |
-| interfaz_fenologia.py | Editor de fotografías |
-| investigacion.py | Consultas y autorizaciones |
-| interfaz_investigacion.py | Perfil investigador |
-| datos_demo_investigacion.py | Datos sintéticos |
-| configuracion_indicadores.py | Criterios de alerta |
-| interfaz_indicadores.py | Configuración de indicadores |
-| regiones_chile.py | Catálogo territorial |
-| inicializar_demo.py | Generador de demostración |
+El manifiesto de modelos registra sus archivos y hashes
+de integridad. Los pesos no se incluyen en GitHub.
 
-## Modelos de inteligencia artificial
+## 7. Ejecución
 
-- sam2_t.pt
-- yolov8s-worldv2.pt
+Desde la carpeta principal:
 
-Los pesos deben obtenerse mediante Ultralytics.
-No se incluyen en el repositorio.
+    source .venv/bin/activate
+    export SSL_CERT_FILE="$(python -m certifi)"
+    python -m streamlit run app.py --server.port 8501
 
-## Seguridad y privacidad
+Abrir:
 
-- Contraseñas protegidas mediante PBKDF2-SHA256.
-- Separación de información por viña.
-- Control de acceso según roles.
-- Autorizaciones para investigación.
-- Validación de permisos administrativos.
+    http://localhost:8501
 
-## Estado del proyecto
+La base de datos predeterminada es data/vina.db.
 
-Prototipo académico en desarrollo.
+Puede seleccionarse una base alternativa mediante
+la variable de entorno VINA_DB_PATH.
 
-Aspectos pendientes:
+Ejemplo:
 
-- Integración de indicadores personalizados con alertas.
-- Validación agronómica de los análisis de IA.
-- Validación de privacidad para investigación.
-- Incorporación de videotutoriales.
-- Preparación para producción.
+    VINA_DB_PATH="$PWD/data/vina_pruebas.db" python -m streamlit run app.py
 
-Los datos de demostración son sintéticos.
-La información meteorológica es referencial.
-FenologIA no sustituye la evaluación profesional en terreno.
+La base alternativa debe prepararse previamente
+para el entorno de pruebas correspondiente.
+
+## 8. Integración con el dispositivo
+
+La plataforma admite la importación de archivos ZIP
+generados según el formato compatible con el dispositivo.
+
+El proceso contempla:
+
+- Identificación del dispositivo.
+- Validación de pertenencia al viñedo.
+- Identificación de plantas.
+- Lectura de mediciones ambientales.
+- Vinculación de fotografías.
+- Validación de fechas y estructura.
+- Detección de duplicados.
+- Comparación con el historial existente.
+- Almacenamiento de capturas validadas.
+
+La transferencia no requiere conectividad celular.
+
+La validación del software de importación no equivale
+a una certificación del funcionamiento físico del robot.
+
+## 9. Seguridad y privacidad
+
+- Autenticación mediante contraseñas protegidas con
+  PBKDF2-SHA256.
+- Control de acceso por roles y pertenencia al viñedo.
+- Validación de permisos en operaciones del backend.
+- Separación de datos de prueba y operacionales.
+- Autorización de uso de información para investigación.
+- Registro de auditoría de consultas de investigación.
+- Protección de archivos privados mediante .gitignore.
+- Verificación de integridad y claves foráneas en SQLite.
+- Respaldos antes de modificaciones relevantes.
+
+No deben publicarse bases de datos privadas, fotografías
+de usuarios, credenciales ni archivos de configuración
+sensibles.
+
+## 10. Inteligencia artificial
+
+YOLO-World proporciona propuestas de detección de racimos.
+SAM 2 permite segmentar las regiones seleccionadas.
+El procesamiento HSV estima la distribución de colores
+dentro de las regiones segmentadas.
+
+Los resultados son experimentales y pueden verse afectados
+por iluminación, sombras, oclusiones, calidad fotográfica
+y selección de las regiones de interés.
+
+Los porcentajes de color no constituyen por sí solos
+una determinación validada de madurez o etapa fenológica.
+
+Se recomienda revisar manualmente cada resultado.
+
+## 11. Tutoriales
+
+La carpeta tutoriales contiene los recursos audiovisuales
+utilizados por el centro de aprendizaje.
+
+Consultar tutoriales/README.md para conocer los nombres
+esperados y el estado de disponibilidad de los recursos.
+
+## 12. Estado de la version
+
+Version: 1.0
+Fecha de consolidacion: noviembre de 2026
+Estado: prototipo funcional academico.
+
+La plataforma ha sido sometida a pruebas funcionales,
+de integridad, autenticacion y permisos.
+
+La validacion agronomica de los modelos, el testeo integral
+del dispositivo fisico, la privacidad de publicaciones
+de investigacion y la certificacion para produccion
+comercial permanecen pendientes.

@@ -277,10 +277,15 @@ def consultar_vinas():
     return resultado
 
 
-def consultar_vina(vina_id):
+def consultar_vina(vina_id, *, usuario_id):
     """Consulta los datos de una viña específica."""
 
     with conectar() as conexion:
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
+
         resultado = conexion.execute("""
             SELECT id, nombre, ubicacion, latitud, longitud
             FROM vinas
@@ -311,11 +316,16 @@ def actualizar_esquema_ubicacion():
                 )
 
 
-def consultar_ubicacion_detallada(vina_id):
+def consultar_ubicacion_detallada(vina_id, *, usuario_id):
 
     actualizar_esquema_ubicacion()
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         fila = conexion.execute("""
             SELECT ubicacion, latitud, longitud,
@@ -654,8 +664,17 @@ def guardar_plantas(datos, vina_id, usuario_id, conexion=None):
     return cantidad
 
 
-def guardar_mediciones(datos, vina_id="VINA001"):
+def guardar_mediciones(
+    datos,
+    vina_id="VINA001",
+    procedencia="sin_verificar"
+):
     """Guarda mediciones asociadas a plantas de una viña."""
+
+    if procedencia not in ("prueba", "sin_verificar"):
+        raise ValueError(
+            "La procedencia real requiere validacion independiente."
+        )
 
     columnas_base = [
         "id", "fecha", "lat", "lon",
@@ -720,7 +739,8 @@ def guardar_mediciones(datos, vina_id="VINA001"):
                 measurement_id,
                 planta_id,
                 fecha,
-                datos_json
+                datos_json,
+                procedencia
             ))
 
         conexion.executemany("""
@@ -728,13 +748,19 @@ def guardar_mediciones(datos, vina_id="VINA001"):
                 measurement_id,
                 plant_id,
                 fecha_hora,
-                datos_json
+                datos_json,
+                procedencia
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
 
             ON CONFLICT(measurement_id) DO UPDATE SET
                 fecha_hora = excluded.fecha_hora,
-                datos_json = excluded.datos_json
+                datos_json = excluded.datos_json,
+                procedencia = CASE
+                    WHEN mediciones.procedencia = 'prueba'
+                    THEN 'prueba'
+                    ELSE excluded.procedencia
+                END
         """, registros)
 
     return len(registros)
@@ -1219,7 +1245,7 @@ def importar_xlsx_mediciones_seguro(datos, vina_id, usuario_id):
     return resultado
 
 
-def consultar_datos(vina_id="VINA001", fecha=None, plant_id=None):
+def consultar_datos(vina_id="VINA001", fecha=None, plant_id=None, *, usuario_id):
     """
     Recupera plantas y mediciones de una viña.
     El código visible y el identificador interno se mantienen separados.
@@ -1228,6 +1254,11 @@ def consultar_datos(vina_id="VINA001", fecha=None, plant_id=None):
     conexion = conectar()
 
     try:
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
+
         consulta = """
             SELECT
                 p.codigo_planta AS id,
@@ -1706,10 +1737,15 @@ def registrar_imagen(
     return image_id
 
 
-def consultar_imagenes_por_planta(plant_id, vina_id="VINA001"):
+def consultar_imagenes_por_planta(plant_id, vina_id="VINA001", *, usuario_id):
     """Obtiene fotografías de una planta perteneciente a una viña."""
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         resultados = conexion.execute("""
             SELECT
@@ -1729,10 +1765,15 @@ def consultar_imagenes_por_planta(plant_id, vina_id="VINA001"):
 
     return resultados
 
-def consultar_todas_las_imagenes(vina_id="VINA001"):
+def consultar_todas_las_imagenes(vina_id="VINA001", *, usuario_id):
     """Obtiene todas las fotografías de una viña."""
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         resultados = conexion.execute("""
             SELECT
@@ -1766,13 +1807,18 @@ def guardar_analisis_imagen(
     etapa_fenologica,
     confianza,
     resultado_json="{}",
-    vina_id="VINA001"
+    vina_id="VINA001", *, usuario_id
 ):
     """Guarda un análisis verificando la propiedad de la fotografía."""
 
     analisis_id = str(uuid.uuid4())
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN IMMEDIATE")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         imagen = conexion.execute("""
             SELECT i.image_id
@@ -1819,10 +1865,15 @@ def guardar_analisis_imagen(
     return analisis_id
 
 
-def consultar_analisis_por_imagen(image_id, vina_id="VINA001"):
+def consultar_analisis_por_imagen(image_id, vina_id="VINA001", *, usuario_id):
     """Consulta análisis de fotografías pertenecientes a una viña."""
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         resultados = conexion.execute("""
             SELECT
@@ -2738,7 +2789,7 @@ def guardar_claro_monitoreado(
     return claro_id
 
 
-def consultar_claro_monitoreado(vina_id, cuartel):
+def consultar_claro_monitoreado(vina_id, cuartel, *, usuario_id):
     """
     Consulta las plantas del claro de un cuartel.
 
@@ -2747,6 +2798,11 @@ def consultar_claro_monitoreado(vina_id, cuartel):
     """
 
     with conectar() as conexion:
+
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
 
         filas = conexion.execute("""
             SELECT
@@ -3016,12 +3072,17 @@ def importar_csv_estructural(datos, vina_id, usuario_id):
     return resultado
 
 
-def consultar_plantas_registradas(vina_id):
+def consultar_plantas_registradas(vina_id, *, usuario_id):
     """Recupera todas las plantas de una viña."""
 
     conexion = conectar()
 
     try:
+        conexion.execute("BEGIN")
+        verificar_permiso_mediciones(
+            conexion, usuario_id, vina_id
+        )
+
         return pd.read_sql_query("""
             SELECT
                 codigo_planta AS id,
@@ -3851,3 +3912,178 @@ CREATE TABLE IF NOT EXISTS auditoria_investigacion (
         REFERENCES usuarios(usuario_id)
 )
         """)
+
+
+
+def actualizar_esquema_procedencia(conexion=None):
+    """Incorpora la procedencia de los datos tecnicos."""
+
+    tablas = (
+        "mediciones",
+        "capturas_dispositivo",
+        "analisis_imagenes"
+    )
+
+    def migrar(con):
+
+        for tabla in tablas:
+
+            columnas = {
+                fila[1]
+                for fila in con.execute(
+                    f"PRAGMA table_info({tabla})"
+                ).fetchall()
+            }
+
+            if not columnas:
+                raise RuntimeError(
+                    f"No existe la tabla {tabla}"
+                )
+
+            if "procedencia" not in columnas:
+
+                con.execute(f"""
+                    ALTER TABLE {tabla}
+                    ADD COLUMN procedencia TEXT
+                    NOT NULL DEFAULT 'sin_verificar'
+                    CHECK (
+                        procedencia IN (
+                            'prueba',
+                            'sin_verificar',
+                            'real'
+                        )
+                    )
+                """)
+
+            con.execute(f"""
+                CREATE INDEX IF NOT EXISTS
+                    idx_{tabla}_procedencia
+                ON {tabla}(procedencia)
+            """)
+
+    if conexion is not None:
+        migrar(conexion)
+
+    else:
+        with conectar() as con:
+            con.execute("BEGIN IMMEDIATE")
+            migrar(con)
+
+
+
+def actualizar_esquema_entorno_vinas(conexion=None):
+
+    def migrar(con):
+
+        columnas = {
+            fila[1]
+            for fila in con.execute(
+                "PRAGMA table_info(vinas)"
+            )
+        }
+
+        if "entorno" not in columnas:
+
+            con.execute("""
+                ALTER TABLE vinas
+                ADD COLUMN entorno TEXT
+                NOT NULL DEFAULT 'sin_verificar'
+                CHECK (
+                    entorno IN (
+                        'prueba',
+                        'sin_verificar',
+                        'operacional'
+                    )
+                )
+            """)
+
+    if conexion is not None:
+        migrar(conexion)
+    else:
+        with conectar() as con:
+            con.execute("BEGIN IMMEDIATE")
+            migrar(con)
+
+
+
+def inicializar_procedencia_automatica(conexion=None):
+
+    def migrar(con):
+
+        configuraciones = [
+            (
+                "mediciones",
+                "measurement_id",
+                """
+                SELECT v.entorno
+                FROM plantas p
+                JOIN vinas v ON v.id = p.vina_id
+                WHERE p.id = NEW.plant_id
+                """
+            ),
+            (
+                "capturas_dispositivo",
+                "captura_id",
+                """
+                SELECT v.entorno
+                FROM plantas p
+                JOIN vinas v ON v.id = p.vina_id
+                WHERE p.id = NEW.plant_id
+                """
+            ),
+            (
+                "analisis_imagenes",
+                "analisis_id",
+                """
+                SELECT CASE
+                    WHEN v.entorno = 'prueba'
+                    THEN 'prueba'
+                    WHEN v.entorno = 'operacional'
+                    AND COALESCE(
+                        m.procedencia,
+                        c.procedencia
+                    ) = 'real'
+                    THEN 'operacional'
+                    ELSE 'sin_verificar'
+                END
+                FROM vista_imagenes_origen i
+                JOIN vinas v ON v.id = i.vina_id
+                LEFT JOIN mediciones m
+                    ON m.measurement_id = i.measurement_id
+                LEFT JOIN capturas_dispositivo c
+                    ON c.captura_id = i.captura_id
+                WHERE i.image_id = NEW.image_id
+                """
+            )
+        ]
+
+        for tabla, clave, consulta in configuraciones:
+
+            con.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS
+                    trg_{tabla}_procedencia_insert
+                AFTER INSERT ON {tabla}
+                BEGIN
+
+                    UPDATE {tabla}
+                    SET procedencia = CASE
+                        WHEN NEW.procedencia = 'prueba'
+                        THEN 'prueba'
+                        WHEN ({consulta}) = 'prueba'
+                        THEN 'prueba'
+                        WHEN ({consulta}) = 'operacional'
+                        THEN 'real'
+                        ELSE 'sin_verificar'
+                    END
+                    WHERE {clave} = NEW.{clave};
+
+                END
+            """)
+
+    if conexion is not None:
+        migrar(conexion)
+    else:
+        with conectar() as con:
+            con.execute("BEGIN IMMEDIATE")
+            migrar(con)
+

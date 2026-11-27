@@ -5,7 +5,6 @@ pandas==2.2.3
 numpy==1.26.4
 requests==2.34.2
 certifi==2026.10.23
-beautifulsoup4==4.15.0
 folium==0.20.0
 streamlit-folium==0.27.4
 geopy==2.5.0
@@ -20,3 +19,4 @@ streamlit-image-coordinates==0.4.1
 openpyxl==3.1.5
 pyarrow==19.0.1
 clip @ git+https://github.com/ultralytics/CLIP.git@7ffa84b3bfa40c42ecc1c77147a855e69cb2dd40
+defusedxml==0.7.1
